@@ -8,6 +8,7 @@ repository:
 
 task_source:
   type: local_markdown
+  path: <REPOSITORY-RELATIVE-TASK-SOURCE.md>
   revision: PENDING
 
 execution:
