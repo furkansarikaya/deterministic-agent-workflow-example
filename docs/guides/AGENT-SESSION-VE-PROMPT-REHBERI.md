@@ -167,6 +167,25 @@ When the task reaches its required final state, update the task-management state
 Do not start another task.
 ```
 
+### Türkçe karşılığı
+
+```text
+Linear'daki TODO-123 issue'su üzerinde çalış.
+
+Bu repository'nin AGENTS.md, CLAUDE.md ve deterministic workflow kurallarını takip et.
+
+TODO-123'ü task identity olarak kullan ve full_lifecycle modunda tüm task lifecycle'ını otonom yürüt.
+
+İlgili deterministic run'ı oluştur veya devam et; gerektiğinde baseline al ve DISCOVER, EVIDENCE, PLAN, freeze, IMPLEMENT, VERIFY, REVIEW, CODE DONE ve gerekli knowledge transaction aşamalarını KNOWLEDGE DONE'a kadar ilerlet.
+
+Progressive disclosure kullan. İlgisiz repository dosyalarını, wiki sayfalarını, historical run'ları, Linear issue'larını veya session geçmişini yükleme.
+Tamamlanmış workflow state'lerini tekrar yapma. Rutin geçişler için onay isteme.
+
+Yalnız material requirement belirsizliği, çözülemeyen authoritative evidence çatışması, onay gerektiren irreversible işlem veya çözülemeyen material scope genişlemesinde dur.
+
+İzin varsa task-management state'ini güncelle, verification evidence içeren kısa final rapor ver ve dur. Başka task başlatma.
+```
+
 ### Markdown task — Claude-only günlük prompt
 
 ```text
@@ -189,6 +208,23 @@ Stop only for a material ambiguity, authoritative evidence conflict, approval-re
 When complete, update the Markdown task/sprint status if repository policy permits it, report the verification evidence and final state, and stop.
 
 Do not start another backlog item.
+```
+
+### Türkçe karşılığı
+
+```text
+docs/project/tasks/TODO-001.md içindeki TODO-001 proje task'ı üzerinde çalış.
+
+Bu repository'nin AGENTS.md, CLAUDE.md ve deterministic workflow kurallarını takip et.
+
+TODO-001'i deterministic task identity olarak kullan ve full_lifecycle modunda lifecycle'ın tamamını otonom yürüt.
+
+Run'ı oluştur veya devam et; DISCOVER, EVIDENCE, PLAN, freeze, IMPLEMENT, VERIFY, REVIEW, CODE DONE ve gerekli knowledge transaction aşamalarını KNOWLEDGE DONE'a kadar sürdür.
+
+Proje task dosyasını task-management source olarak kullan; executable contract'ı repository policy'sine göre deterministic run'a normalize et.
+Progressive disclosure kullan, ilgisiz backlog/sprint/wiki/historical run context'ini yükleme ve rutin geçişlerde onay isteme.
+
+Yalnız material belirsizlik, evidence çatışması, onay gerektiren irreversible işlem veya çözülemeyen scope genişlemesinde dur. İzin varsa Markdown task/sprint state'ini güncelle, verification evidence ile rapor ver ve dur.
 ```
 
 ---
@@ -236,6 +272,20 @@ Ask only for a genuine material ambiguity, unresolved authoritative evidence con
 When complete, report the verification evidence and final state, update task-management state only if permitted, and stop.
 
 Do not start another task.
+```
+
+### Türkçe karşılığı
+
+```text
+Linear'daki TODO-123 issue'su üzerinde full_lifecycle modunda çalış.
+
+AGENTS.md ve repository deterministic workflow'unu takip et. TODO-123'ü task identity olarak kullan.
+
+İlgili run'ı oluştur veya devam et; DISCOVER, EVIDENCE, PLAN, freeze, IMPLEMENT, VERIFY, REVIEW, CODE DONE ve gerekli knowledge transaction aşamalarını KNOWLEDGE DONE'a kadar otonom yürüt.
+
+Progressive disclosure kullan. Tamamlanmış workflow state'lerini tekrar yapma, ilgisiz refactor yapma ve rutin geçişlerde onay isteme.
+
+Yalnız gerçek material belirsizlik, çözülemeyen evidence çatışması, onay gerektiren irreversible işlem veya kaçınılmaz scope genişlemesinde sor. Tamamlanınca verification evidence ve final state'i raporla, izin varsa task-management state'ini güncelle ve dur.
 ```
 
 ---
@@ -469,6 +519,24 @@ When complete, update the Markdown task/sprint state only if repository policy p
 Do not start another backlog item.
 ```
 
+### Türkçe karşılığı
+
+```text
+docs/project/tasks/TODO-001.md içindeki TODO-001 task'ı üzerinde lifecycle orchestrator olarak çalış.
+
+AGENTS.md, CLAUDE.md ve repository deterministic workflow'unu takip et. TODO-001 deterministic task identity'sidir.
+
+Run'ı oluştur veya devam et. Baseline, DISCOVER, EVIDENCE, PLAN ve freeze'i kendin yürüt.
+
+Yalnız application implementation'ını Codex'e explicit implementation_worker rolüyle delege et. Codex frozen TASK/EVIDENCE/PLAN'ı kullanmalı, yalnız yetkili scope'u uygulamalı, odaklı check'ler çalıştırmalı ve sana dönmelidir.
+
+Codex döndükten sonra VERIFY ve REVIEW'i kendin yap. Bounded fix gerekirse Codex'i yalnız focused fix instruction ile worker olarak tekrar çağır.
+
+Codex'in planning, refreeze, review, CODE DONE, delivery, knowledge işlemi veya recursive delegation yapmasına izin verme. Lifecycle owner olarak required final state'e kadar sen kal.
+
+Progressive disclosure kullan; tamamlanmış state'leri tekrar yapma, ilgisiz refactor/approval döngüsü oluşturma. İzin varsa Markdown task/sprint state'ini güncelle, verification evidence ile rapor ver ve dur.
+```
+
 ---
 
 ## 8. Codex implementation worker dispatch prompt
@@ -529,6 +597,26 @@ When implementation is complete:
 Stop after returning the implementation result.
 ```
 
+### Türkçe karşılığı
+
+```text
+Mevcut aktif deterministic task için implementation worker olarak davran.
+
+Sen workflow orchestrator değil, bounded implementation worker'sın.
+Önceden freeze edilmiş TASK, EVIDENCE ve PLAN'ı kullan.
+Doğru frozen task üzerinde çalıştığını anlamak için yalnız minimum persisted repository/run state'ini doğrula.
+
+Yalnız PLAN tarafından yetkili application scope'u uygula.
+
+Yapabileceklerin: active run ve frozen contract'ı okumak, task-relevant repository/Git state'i incelemek, yetkili application path'lerini değiştirmek, focused implementation check'leri çalıştırmak ve frozen scope içindeki implementation kaynaklı hataları düzeltmektir.
+
+DISCOVER, EVIDENCE, PLAN, amendment/refreeze, scope genişletme, REVIEW, VERIFIED/REVIEWED/CODE DONE, delivery, commit/push, external task update, wiki/knowledge, başka worker çağırma veya delegation yapma.
+
+Material planning kararı, PLAN dışı path, conflicting authoritative evidence veya yetkisiz destructive/irreversible işlem gerekirse DUR ve blocker'ı orchestrator'a döndür. Contract'ı kendin değiştirme.
+
+Bitince changed path'leri, focused check sonuçlarını ve caveat'leri raporla; control'ü orchestrator'a döndür ve dur.
+```
+
 ---
 
 ## 9. Bounded fix — Claude → Codex prompt
@@ -564,6 +652,24 @@ When the fix is complete, report:
 - any blocker/caveat,
 
 then return control to the orchestrator and stop.
+```
+
+### Türkçe karşılığı
+
+```text
+Mevcut aktif deterministic task için implementation_worker olarak davran.
+
+Orchestrator'un verification/review sırasında bulduğu issue:
+
+<TAM HATA / REVIEW BULGUSU>
+
+Yalnız bu issue'yu mevcut frozen TASK, EVIDENCE, PLAN ve yetkili application scope içinde düzelt.
+
+Discovery, evidence, planning veya freeze'i tekrar yapma. Scope genişletme, review, VERIFIED/REVIEWED/CODE DONE, delivery, knowledge veya delegation yapma.
+
+Fix material plan/scope değişikliği gerektirirse frozen contract'ı değiştirmek yerine dur ve blocker'ı döndür.
+
+Bitince changed path'leri, düzeltmeyi, focused check sonuçlarını ve caveat'leri raporla; control'ü orchestrator'a döndür ve dur.
 ```
 
 Akış:
@@ -631,6 +737,20 @@ Do not recreate or redo completed workflow states.
 Do not rely on previous chat history.
 
 Continue until the task reaches its required final state or a genuine user decision is required.
+```
+
+### Türkçe karşılığı
+
+```text
+Mevcut aktif deterministic task'a full_lifecycle modunda devam et.
+
+AGENTS.md ve repository deterministic workflow'unu takip et. Active run'ı repository state'ten çöz.
+
+Güvenli devam için yalnız gerekli persisted state'i doğrula; frozen TASK/EVIDENCE/PLAN ve current Git state'i incele, son geçerli workflow state'ini belirle ve buradan otonom devam et.
+
+Tamamlanmış workflow state'lerini yeniden oluşturma veya tekrar yapma. Önceki chat geçmişine dayanma.
+
+Task required final state'e ulaşana ya da gerçek bir user kararı gerekene kadar devam et.
 ```
 
 ---
@@ -990,6 +1110,17 @@ Do not perform unrelated improvements.
 Stop when the required final state is reached.
 ```
 
+### Türkçe karşılığı
+
+```text
+<TASK> üzerinde full_lifecycle modunda çalış.
+
+AGENTS.md, CLAUDE.md ve deterministic workflow'u takip et.
+Deterministic run'ı oluştur veya devam et; gerekli lifecycle'ı otonom tamamla.
+Tamamlanmış state'leri tekrar yapma, progressive disclosure kullan, rutin onay isteme ve ilgisiz iyileştirme yapma.
+Gerekli final state'e ulaştığında dur.
+```
+
 ## B. Codex-only
 
 ```text
@@ -1001,6 +1132,16 @@ Do not redo completed states.
 Do not rely on previous chat history.
 Do not perform unrelated improvements.
 Stop at the required final state.
+```
+
+### Türkçe karşılığı
+
+```text
+<TASK> üzerinde full_lifecycle modunda çalış.
+
+AGENTS.md ve deterministic workflow'u takip et.
+Run'ı oluştur veya devam et; gerekli lifecycle boyunca otonom ilerle.
+Tamamlanmış state'leri tekrar yapma, önceki chat geçmişine dayanma, ilgisiz iyileştirme yapma ve gerekli final state'te dur.
 ```
 
 ## C. Claude orchestrator + Codex
@@ -1020,6 +1161,18 @@ Do not let the worker plan, refreeze, review, deliver, perform knowledge work, o
 Continue autonomously until the required final state and stop.
 ```
 
+### Türkçe karşılığı
+
+```text
+<TASK> üzerinde lifecycle orchestrator olarak çalış.
+
+DISCOVER, EVIDENCE, PLAN, freeze, VERIFY, REVIEW, CODE DONE, delivery kararları ve knowledge işinin sahibi sen ol.
+Yalnız application implementation'ını explicit implementation_worker rolüyle Codex'e delege et.
+Codex döndükten sonra aynı run'a sen devam et; bounded fix gerekirse focused instruction ile yalnız worker olarak tekrar çağır.
+Worker'ın planning, refreeze, review, delivery, knowledge veya delegation yapmasına izin verme.
+Gerekli final state'e kadar otonom ilerle ve dur.
+```
+
 ## D. Codex worker
 
 ```text
@@ -1034,6 +1187,16 @@ If material scope/planning change is required, return a blocker.
 Report changed paths and focused checks, return control to the orchestrator, and stop.
 ```
 
+### Türkçe karşılığı
+
+```text
+Mevcut aktif deterministic task için implementation_worker olarak davran.
+Frozen TASK, EVIDENCE ve PLAN'ı kullan; yalnız yetkili application scope'u uygula.
+Planning, refreeze, review, delivery, knowledge veya delegation yapma.
+Material scope/planning değişikliği gerekirse blocker döndür.
+Changed path'leri ve focused check'leri raporla, control'ü orchestrator'a döndür ve dur.
+```
+
 ## E. Cross-agent resume
 
 ```text
@@ -1044,6 +1207,15 @@ Resolve the active run from repository state, determine the last valid workflow 
 Do not redo completed states.
 Do not rely on previous chat history.
 Continue autonomously until the required final state or a genuine user decision is required.
+```
+
+### Türkçe karşılığı
+
+```text
+Mevcut aktif deterministic task'a full_lifecycle modunda devam et.
+Active run'ı repository state'ten çöz, son geçerli workflow state'ini belirle ve buradan devam et.
+Tamamlanmış state'leri tekrar yapma, önceki chat geçmişine dayanma.
+Gerekli final state'e veya gerçek user kararı gerektiren noktaya kadar otonom ilerle.
 ```
 
 ## F. Bounded fix
@@ -1059,6 +1231,19 @@ Stay inside the frozen TASK/EVIDENCE/PLAN and authorized scope.
 Do not plan, refreeze, review, mark CODE DONE, deliver, modify knowledge, or delegate.
 
 Run focused implementation checks, report the correction and changed paths, return control to the orchestrator, and stop.
+```
+
+### Türkçe karşılığı
+
+```text
+Mevcut aktif task için implementation_worker olarak davran.
+
+Yalnız şu verification/review bulgusunu düzelt:
+
+<BULGU>
+
+Frozen TASK/EVIDENCE/PLAN ve yetkili scope içinde kal. Planning, refreeze, review, CODE DONE, delivery, knowledge veya delegation yapma.
+Focused implementation check'leri çalıştır; düzeltmeyi ve changed path'leri raporla, control'ü orchestrator'a döndür ve dur.
 ```
 
 ---
