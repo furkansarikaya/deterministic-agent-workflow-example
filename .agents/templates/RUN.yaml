@@ -6,6 +6,10 @@ task:
 repository:
   base_sha: PENDING
 
+task_source:
+  type: local_markdown
+  revision: PENDING
+
 execution:
   mode: deterministic
   profile: core
@@ -19,3 +23,9 @@ freeze:
   evidence_sha256: PENDING
   plan_sha256: PENDING
   policy_sha256: PENDING
+
+handoff:
+  state: PLANNED
+  verification_patch_sha256: PENDING
+  review_patch_sha256: PENDING
+  code_done_patch_sha256: PENDING

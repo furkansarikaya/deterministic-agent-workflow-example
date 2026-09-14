@@ -29,12 +29,15 @@ For a new run, create it from templates, set `ACTIVE_RUN`, read its TASK, then c
 ./scripts/agent.sh baseline <TASK-ID>
 ```
 
-Then DISCOVER read-only, build EVIDENCE and PLAN, freeze and verify them, implement, verify application scope, review, and reach CODE DONE. Only then run `/wiki-ingest` and `/wiki-lint` as Transaction B:
+Then DISCOVER read-only, build EVIDENCE and PLAN, freeze and verify freshness, implement, verify application scope, review, and record handoff fingerprints. CODE DONE is local completion only; use the local delivery gate before any separately authorized provider action. Only then run `/wiki-ingest` and `/wiki-lint` as Transaction B:
 
 ```sh
 ./scripts/agent.sh freeze <TASK-ID>
 ./scripts/agent.sh verify-freeze <TASK-ID>
+./scripts/agent.sh freshness <TASK-ID>
 ./scripts/agent.sh verify-scope <TASK-ID>
+./scripts/agent.sh verify-handoff <TASK-ID>
+./scripts/agent.sh delivery-check <TASK-ID>
 ```
 
 The checked-in template intentionally leaves `.agents/ACTIVE_RUN` empty. `status` then reports `active_task=none` and implementation is blocked. The YAML policy in `.agents/modes/` is machine-readable; the shared Markdown files explain the rules. Templates for the next run live in `.agents/templates/`.

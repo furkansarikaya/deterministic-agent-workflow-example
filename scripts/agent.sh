@@ -42,9 +42,19 @@ effective() {
   ' "$policy"
 }
 
-run_state() { sed -n 's/^[[:space:]]*state: *//p' "$1/RUN.yaml" | head -1; }
+run_state() { sed -n 's/^[[:space:]]*state: *//p' "$1/RUN.yaml" | head -1 | tr -d '"'; }
 baseline_status() { awk '/^baseline:$/ { inside=1; next } inside && /^[^[:space:]]/ { exit } inside && /^[[:space:]]*status:/ { sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit }' "$1/RUN.yaml"; }
 repository_base_sha() { awk '/^repository:$/ { inside=1; next } inside && /^[^[:space:]]/ { exit } inside && /^[[:space:]]*base_sha:/ { sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit }' "$1/RUN.yaml"; }
+section_value() { awk -v section="$2" -v key="$3" '$0 == section ":" { inside=1; next } inside && /^[^[:space:]]/ { exit } inside && $0 ~ "^[[:space:]]*" key ":" { sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit }' "$1/RUN.yaml"; }
+replace_section_value() {
+  awk -v section="$2" -v key="$3" -v value="$4" '
+    $0 == section ":" { inside=1; print; next }
+    inside && /^[^[:space:]]/ { inside=0 }
+    inside && $0 ~ "^[[:space:]]*" key ":" { print "  " key ": \"" value "\""; found=1; next }
+    { print }
+    END { if (!found) exit 1 }
+  ' "$1/RUN.yaml" > "$5"
+}
 historical_reference() { [ "$1" = EXAMPLE-001 ] && [ "$(baseline_status "$(run_dir "$1")")" = legacy_not_captured ] && [ "$(run_state "$(run_dir "$1")")" = CODE_DONE ]; }
 
 # Only regular files are fingerprinted. Symlinks and special files are refused rather
@@ -110,6 +120,28 @@ replace_hashes() {
     { print }
   ' "$dir/RUN.yaml" > "$target"
 }
+set_task_source_revision() {
+  dir=$1 type=$(section_value "$dir" task_source type)
+  case "$type" in
+    local_markdown) replace_section_value "$dir" task_source revision "$(hash_file "$dir/TASK.md")" "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml" ;;
+    none) [ "$(section_value "$dir" task_source revision)" = not_applicable ] || fail "task source none requires revision: not_applicable" ;;
+    *) fail "task source adapter unavailable: ${type:-missing}" ;;
+  esac
+}
+verify_freshness() {
+  id=$1; require_run "$id"; dir=$(run_dir "$id")
+  historical_reference "$id" && { echo "freshness historical reference: $id"; return 0; }
+  verify_freeze "$id"
+  base=$(repository_base_sha "$dir"); head=$(git -C "$root" rev-parse HEAD)
+  [ "$base" = "$head" ] || fail "stale plan: repository.base_sha changed ($base -> $head); amendment and refreeze required"
+  type=$(section_value "$dir" task_source type); revision=$(section_value "$dir" task_source revision)
+  case "$type:$revision" in
+    local_markdown:*) [ "$revision" = "$(hash_file "$dir/TASK.md")" ] || fail "stale plan: task source revision changed; amendment and refreeze required" ;;
+    none:not_applicable) : ;;
+    *) fail "task source revision unavailable or unsupported; amendment or adapter required" ;;
+  esac
+  echo "planning freshness verified: $id"
+}
 freeze_hash_present() {
   awk '/^freeze:$/ { inside=1; next } inside && /^[^[:space:]]/ { exit } inside && /^[[:space:]]*(task|evidence|plan|policy)_sha256: "[0-9a-f][0-9a-f]/ { found=1 } END { exit !found }' "$1/RUN.yaml"
 }
@@ -133,6 +165,57 @@ scope_mappings() {
   ' "$1"
 }
 authorized_path() { printf '%s\n' "$1" | cut -d '|' -f1 | grep -Fxq "$2"; }
+task_owned_paths() {
+  id=$1; dir=$(run_dir "$id"); mappings=$(scope_mappings "$dir/PLAN.md") || return 1
+  for type in tracked untracked; do
+    paths=$( [ "$type" = tracked ] && current_tracked_paths || current_untracked_paths )
+    printf '%s\n' "$paths" | while IFS= read -r changed; do
+      [ -n "$changed" ] || continue; known_control_artifact "$id" "$changed" && continue
+      prior=$(baseline_fingerprint "$type" "$changed" "$dir"); current=$(fingerprint_path "$changed")
+      [ -n "$prior" ] && [ "$prior" = "$current" ] && continue
+      authorized_path "$mappings" "$changed" || continue
+      printf '%s\n' "$changed"
+    done
+  done | sort -u
+}
+task_patch_fingerprint() {
+  id=$1; task_owned_paths "$id" | while IFS= read -r path; do [ -n "$path" ] && printf '%s %s\n' "$path" "$(fingerprint_path "$path")"; done | shasum -a 256 | awk '{print $1}'
+}
+record_handoff() {
+  id=$1 phase=$2; require_run "$id"; dir=$(run_dir "$id")
+  verify_freshness "$id"; verify_scope "$id"
+  case "$phase" in IMPLEMENTING|VERIFIED|REVIEWED|CODE_DONE) ;; *) fail "invalid handoff phase";; esac
+  patch=$(task_patch_fingerprint "$id")
+  tmp=$dir/RUN.yaml.tmp; replace_section_value "$dir" handoff state "$phase" "$tmp" && mv "$tmp" "$dir/RUN.yaml"
+  case "$phase" in
+    VERIFIED) replace_section_value "$dir" handoff verification_patch_sha256 "$patch" "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml" ;;
+    REVIEWED) replace_section_value "$dir" handoff review_patch_sha256 "$patch" "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml" ;;
+    CODE_DONE) replace_section_value "$dir" handoff code_done_patch_sha256 "$patch" "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml" ;;
+  esac
+  if [ "$phase" = CODE_DONE ]; then replace_section_value "$dir" execution state CODE_DONE "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml"; fi
+  echo "handoff recorded: $id $phase"
+}
+verify_handoff() {
+  id=$1; require_run "$id"; dir=$(run_dir "$id"); historical_reference "$id" && { echo "handoff historical reference: $id"; return 0; }
+  verify_scope "$id"; patch=$(task_patch_fingerprint "$id"); state=$(section_value "$dir" handoff state)
+  for gate in verification review code_done; do
+    recorded=$(section_value "$dir" handoff "${gate}_patch_sha256")
+    case "$recorded" in ''|PENDING) continue;; esac
+    [ "$recorded" = "$patch" ] || fail "${gate} stale: task-owned patch changed; rerun affected gate"
+  done
+  [ -n "$state" ] || fail "handoff state missing"
+  echo "handoff integrity verified: $id"
+}
+delivery_check() {
+  id=$1; require_run "$id"; dir=$(run_dir "$id"); historical_reference "$id" && fail "delivery unavailable for historical reference"
+  [ "$(run_state "$dir")" = CODE_DONE ] || fail "delivery blocked: CODE_DONE required"
+  branch=$(git -C "$root" branch --show-current); [ -n "$branch" ] || fail "delivery blocked: detached HEAD"
+  verify_freshness "$id"; verify_scope "$id"; verify_handoff "$id"
+  patch=$(task_patch_fingerprint "$id"); [ "$(section_value "$dir" handoff verification_patch_sha256)" = "$patch" ] || fail "delivery blocked: verification stale or missing"
+  [ "$(section_value "$dir" handoff review_patch_sha256)" = "$patch" ] || fail "delivery blocked: review stale or missing"
+  [ "$(section_value "$dir" handoff code_done_patch_sha256)" = "$patch" ] || fail "delivery blocked: CODE_DONE handoff stale or missing"
+  printf 'delivery_branch=%s\ndelivery_ready=true\n' "$branch"
+}
 
 # Run metadata is deliberately separate from application scope. This exact allowlist
 # applies only to the active run directory; no other .agents paths are ignored.
@@ -195,25 +278,27 @@ freeze() {
   id=$1; require_run "$id"; dir=$(run_dir "$id"); for f in TASK.md EVIDENCE.md PLAN.md RUN.yaml; do [ -f "$dir/$f" ] || fail "missing $f"; done
   [ "$(run_state "$dir")" != CODE_DONE ] || fail "cannot freeze completed run: $id"; [ "$(baseline_status "$dir")" = captured ] || fail "baseline required before freeze: $id"
   if freeze_hash_present "$dir"; then [ "${2:-}" = refreeze ] && [ -n "${3:-}" ] && [ -f "$dir/amendments/$3" ] || fail "existing freeze requires explicit amendment"; fi
-  tmp=$dir/RUN.yaml.tmp; replace_hashes "$dir" "$tmp"; mv "$tmp" "$dir/RUN.yaml"; echo "freeze recorded: $id"
+  set_task_source_revision "$dir"; tmp=$dir/RUN.yaml.tmp; replace_hashes "$dir" "$tmp"; mv "$tmp" "$dir/RUN.yaml"; echo "freeze recorded: $id"
 }
 
 fixture_test() {
-  tmp=$(mktemp -d /tmp/deterministic-agent.XXXXXX); trap 'rm -rf "$tmp"' EXIT
+  tmp=$(mktemp -d /tmp/deterministic-agent.XXXXXX); scratch=$(mktemp -d /tmp/deterministic-agent-scratch.XXXXXX); trap 'rm -rf "$tmp" "$scratch"' EXIT
   mkdir -p "$tmp/.agents/runs/FIX/review" "$tmp/.agents/modes" "$tmp/scripts" "$tmp/docs/wiki"
   cp "$root/scripts/agent.sh" "$root/scripts/wiki-lint.sh" "$tmp/scripts/"; cp "$root/.agents/config.yaml" "$tmp/.agents/"; cp "$root/.agents/modes/"*.yaml "$tmp/.agents/modes/"; printf 'FIX\n' > "$tmp/.agents/ACTIVE_RUN"
   printf '# Task\n' > "$tmp/.agents/runs/FIX/TASK.md"; printf '# Evidence\n' > "$tmp/.agents/runs/FIX/EVIDENCE.md"
   printf '%s\n' '---' 'scope:' '  - path: authorized.txt' '    criteria: [AC-1]' '---' '# Plan' > "$tmp/.agents/runs/FIX/PLAN.md"
-  printf '%s\n' 'repository:' '  base_sha: PENDING' 'execution:' '  mode: deterministic' '  profile: core' 'freeze:' '  task_sha256: PENDING' '  evidence_sha256: PENDING' '  plan_sha256: PENDING' '  policy_sha256: PENDING' 'baseline:' '  status: pending' > "$tmp/.agents/runs/FIX/RUN.yaml"
+  printf '%s\n' 'repository:' '  base_sha: PENDING' 'task_source:' '  type: local_markdown' '  revision: PENDING' 'execution:' '  mode: deterministic' '  profile: core' '  state: PLANNING' 'freeze:' '  task_sha256: PENDING' '  evidence_sha256: PENDING' '  plan_sha256: PENDING' '  policy_sha256: PENDING' 'baseline:' '  status: pending' 'handoff:' '  state: PLANNED' '  verification_patch_sha256: PENDING' '  review_patch_sha256: PENDING' '  code_done_patch_sha256: PENDING' > "$tmp/.agents/runs/FIX/RUN.yaml"
   printf '# review\n' > "$tmp/.agents/runs/FIX/review/code-review.md"; printf '# verifier\n' > "$tmp/.agents/runs/FIX/review/verification.md"; printf '# result\n' > "$tmp/.agents/runs/FIX/RESULT.md"
   (cd "$tmp"; git init -q; git config user.email fixture@example.invalid; git config user.name fixture; : > authorized.txt; : > user-dirty.txt; git add -- .agents scripts docs authorized.txt user-dirty.txt; git commit -qm baseline
-    printf 'user work\n' > user-dirty.txt; : > user-untracked.txt; ./scripts/agent.sh baseline FIX; printf 'discovered\n' >> .agents/runs/FIX/EVIDENCE.md; printf 'planned\n' >> .agents/runs/FIX/PLAN.md; ./scripts/agent.sh verify-scope FIX; ./scripts/agent.sh freeze FIX; ./scripts/agent.sh verify-freeze FIX; ./scripts/agent.sh validate FIX; cp .agents/runs/FIX/RUN.yaml run.original; sed 's/base_sha: ".*"/base_sha: "PENDING"/' run.original > .agents/runs/FIX/RUN.yaml; if ./scripts/agent.sh validate FIX; then exit 1; fi; mv run.original .agents/runs/FIX/RUN.yaml
+    printf 'user work\n' > user-dirty.txt; : > user-untracked.txt; ./scripts/agent.sh baseline FIX; printf 'discovered\n' >> .agents/runs/FIX/EVIDENCE.md; printf 'planned\n' >> .agents/runs/FIX/PLAN.md; ./scripts/agent.sh verify-scope FIX; ./scripts/agent.sh freeze FIX; ./scripts/agent.sh verify-freeze FIX; ./scripts/agent.sh freshness FIX; ./scripts/agent.sh handoff FIX IMPLEMENTING; ./scripts/agent.sh verify-handoff FIX; ./scripts/agent.sh validate FIX; cp .agents/runs/FIX/RUN.yaml "$scratch/run.original"; sed 's/base_sha: ".*"/base_sha: "PENDING"/' "$scratch/run.original" > .agents/runs/FIX/RUN.yaml; if ./scripts/agent.sh validate FIX; then exit 1; fi; cp "$scratch/run.original" .agents/runs/FIX/RUN.yaml; sed 's/revision: ".*"/revision: "changed"/' "$scratch/run.original" > .agents/runs/FIX/RUN.yaml; if ./scripts/agent.sh freshness FIX; then exit 1; fi; cp "$scratch/run.original" .agents/runs/FIX/RUN.yaml; cp .agents/modes/deterministic.yaml "$scratch/policy.original"; printf '\n# changed\n' >> .agents/modes/deterministic.yaml; if ./scripts/agent.sh verify-freeze FIX; then exit 1; fi; mv "$scratch/policy.original" .agents/modes/deterministic.yaml
+    git commit --allow-empty -qm planning-source-advanced; if ./scripts/agent.sh freshness FIX; then exit 1; fi; sed "s/base_sha: \".*\"/base_sha: \"$(git rev-parse HEAD)\"/" "$scratch/run.original" > .agents/runs/FIX/RUN.yaml; mkdir -p .agents/runs/FIX/amendments; printf '# amendment\n' > .agents/runs/FIX/amendments/001.md; ./scripts/agent.sh refreeze FIX 001.md; ./scripts/agent.sh freshness FIX; cp .agents/runs/FIX/RUN.yaml "$scratch/source.original"; sed 's/type: local_markdown/type: none/; s/revision: ".*"/revision: not_applicable/' "$scratch/source.original" > .agents/runs/FIX/RUN.yaml; ./scripts/agent.sh freshness FIX; mv "$scratch/source.original" .agents/runs/FIX/RUN.yaml
     ./scripts/agent.sh verify-scope FIX
     printf 'agent touched dirty path\n' >> user-dirty.txt; if ./scripts/agent.sh verify-scope FIX; then exit 1; fi; git checkout -- user-dirty.txt; printf 'user work\n' > user-dirty.txt
     printf 'agent touched untracked path\n' >> user-untracked.txt; if ./scripts/agent.sh verify-scope FIX; then exit 1; fi; : > user-untracked.txt
     printf 'change\n' > authorized.txt; ./scripts/agent.sh verify-scope FIX; printf 'unexpected\n' > unexpected.txt; if ./scripts/agent.sh verify-scope FIX; then exit 1; fi; rm unexpected.txt
     printf 'random\n' > .agents/runs/FIX/random.txt; if ./scripts/agent.sh verify-scope FIX; then exit 1; fi; if ./scripts/agent.sh validate FIX; then exit 1; fi; rm .agents/runs/FIX/random.txt
-    cp .agents/runs/FIX/EVIDENCE.md evidence.original; printf 'tamper\n' >> .agents/runs/FIX/EVIDENCE.md; if ./scripts/agent.sh verify-freeze FIX; then exit 1; fi; mv evidence.original .agents/runs/FIX/EVIDENCE.md; mkdir -p .agents/runs/FIX/amendments; printf '# amendment\n' > .agents/runs/FIX/amendments/001.md; ./scripts/agent.sh refreeze FIX 001.md
+    ./scripts/agent.sh handoff FIX VERIFIED; ./scripts/agent.sh handoff FIX REVIEWED; ./scripts/agent.sh verify-handoff FIX; printf 'again\n' >> authorized.txt; if ./scripts/agent.sh verify-handoff FIX; then exit 1; fi; ./scripts/agent.sh refreeze FIX 001.md; ./scripts/agent.sh handoff FIX VERIFIED; ./scripts/agent.sh handoff FIX REVIEWED; ./scripts/agent.sh handoff FIX CODE_DONE; ./scripts/agent.sh delivery-check FIX; printf 'post-review\n' >> authorized.txt; if ./scripts/agent.sh delivery-check FIX; then exit 1; fi; printf 'unauthorized\n' > delivery-unexpected.txt; if ./scripts/agent.sh delivery-check FIX; then exit 1; fi; rm delivery-unexpected.txt
+    cp .agents/runs/FIX/EVIDENCE.md evidence.original; printf 'tamper\n' >> .agents/runs/FIX/EVIDENCE.md; if ./scripts/agent.sh verify-freeze FIX; then exit 1; fi; mv evidence.original .agents/runs/FIX/EVIDENCE.md
     printf 'MISSING\n' > .agents/ACTIVE_RUN; if ./scripts/agent.sh status; then exit 1; fi; : > .agents/ACTIVE_RUN; ./scripts/agent.sh status | grep -Fxq 'active_task=none'; printf 'FIX\n' > .agents/ACTIVE_RUN
     printf '# index\n[[missing]]\n' > docs/wiki/index.md; if ./scripts/wiki-lint.sh; then exit 1; fi)
   echo 'agent control tests passed'
@@ -227,7 +312,11 @@ command=${1:-}; case "$command" in
   refreeze) freeze "${2:?usage: $0 refreeze <TASK-ID> <AMENDMENT>}" refreeze "${3:?usage: $0 refreeze <TASK-ID> <AMENDMENT>}" ;;
   verify-freeze) verify_freeze "${2:?usage: $0 verify-freeze <TASK-ID>}" ;;
   verify-scope) verify_scope "${2:?usage: $0 verify-scope <TASK-ID>}" ;;
-  validate) id=${2:?usage: $0 validate <TASK-ID>}; require_run "$id"; dir=$(run_dir "$id"); for f in TASK.md EVIDENCE.md PLAN.md RUN.yaml review/code-review.md review/verification.md RESULT.md; do [ -f "$dir/$f" ] || fail "missing required artifact: $f"; done; validate_control_artifacts "$id"; scope_mappings "$dir/PLAN.md" >/dev/null; status=$(baseline_status "$dir"); if [ "$status" = captured ]; then validate_captured_baseline "$dir"; else historical_reference "$id" || fail "baseline missing or pending: $id"; fi; verify_freeze "$id"; echo "run validated: $id" ;;
+  freshness) verify_freshness "${2:?usage: $0 freshness <TASK-ID>}" ;;
+  handoff) record_handoff "${2:?usage: $0 handoff <TASK-ID> <PHASE>}" "${3:?usage: $0 handoff <TASK-ID> <PHASE>}" ;;
+  verify-handoff) verify_handoff "${2:?usage: $0 verify-handoff <TASK-ID>}" ;;
+  delivery-check) delivery_check "${2:?usage: $0 delivery-check <TASK-ID>}" ;;
+  validate) id=${2:?usage: $0 validate <TASK-ID>}; require_run "$id"; dir=$(run_dir "$id"); for f in TASK.md EVIDENCE.md PLAN.md RUN.yaml review/code-review.md review/verification.md RESULT.md; do [ -f "$dir/$f" ] || fail "missing required artifact: $f"; done; validate_control_artifacts "$id"; scope_mappings "$dir/PLAN.md" >/dev/null; status=$(baseline_status "$dir"); if [ "$status" = captured ]; then validate_captured_baseline "$dir"; else historical_reference "$id" || fail "baseline missing or pending: $id"; fi; verify_freshness "$id"; verify_handoff "$id"; echo "run validated: $id" ;;
   test) fixture_test ;;
-  *) echo "usage: $0 {status|effective|baseline|freeze|refreeze|verify-freeze|verify-scope|validate|test} [TASK-ID]" >&2; exit 2 ;;
+  *) echo "usage: $0 {status|effective|baseline|freeze|refreeze|verify-freeze|freshness|handoff|verify-handoff|delivery-check|validate|test} [TASK-ID]" >&2; exit 2 ;;
 esac
