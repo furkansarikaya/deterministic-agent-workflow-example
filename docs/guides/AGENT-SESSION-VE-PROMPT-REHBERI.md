@@ -1,9 +1,17 @@
 # Agent Session ve Prompt Rehberi
 
-Bu rehber, deterministic agent workflow kullanırken Claude Code veya
-Codex ile bir task'ın bir session içinde nasıl yürütüleceğini anlatır.
-Linear kullanan ve kullanmayan projeler için aynı temel model
-geçerlidir.
+Bu rehber, deterministic agent workflow kullanırken Claude Code ve Codex ile bir task'ın nasıl yürütüleceğini anlatır.
+
+Desteklenen temel kullanım modelleri:
+
+1. **Claude-only**
+2. **Codex-only**
+3. **Claude orchestrator + Codex implementation worker**
+4. **Cross-agent full-lifecycle resume** — örneğin Claude ile başlayıp Codex ile aynı run'a devam etmek
+
+Linear kullanan ve kullanmayan projeler için aynı temel model geçerlidir.
+
+---
 
 ## 1. Temel model
 
@@ -15,24 +23,23 @@ Tercih edilen kullanım:
 
 > **1 task = 1 ana Claude/Codex session.**
 
-Ancak session workflow state'i değildir. Bir session kapanabilir, başka
-bir session açılabilir, hatta uygun durumda Claude'dan Codex'e
-geçilebilir. Kalıcı state chat geçmişinde değil şuralardadır:
+Ancak session workflow state'i değildir. Bir session kapanabilir, başka bir session açılabilir, hatta task aynı deterministic run üzerinden başka bir agent tarafından sürdürülebilir.
 
--   Git ve mevcut repository state'i
--   `.agents/runs/<TASK-ID>/`
--   `TASK.md`
--   `EVIDENCE.md`
--   `PLAN.md`
--   `RUN.yaml`
--   gerektiğinde `RESULT.md`
--   canonical proje dokümantasyonu
--   gerektiğinde LLM Wiki
+Kalıcı state chat geçmişinde değil şuralardadır:
 
-Bu nedenle Plan, Implement, Verify ve Review için kullanıcının ayrı ayrı
-manuel session açması gerekmez.
+- Git ve mevcut repository state'i
+- `.agents/runs/<TASK-ID>/`
+- `TASK.md`
+- `EVIDENCE.md`
+- `PLAN.md`
+- `RUN.yaml`
+- gerektiğinde `RESULT.md`
+- canonical proje dokümantasyonu
+- gerektiğinde LLM Wiki
 
-``` text
+Bu nedenle Plan, Implement, Verify ve Review için kullanıcının ayrı ayrı manuel session açması gerekmez.
+
+```text
 TASK
   ↓
 ACTIVATE RUN
@@ -62,159 +69,84 @@ KNOWLEDGE DONE
 STOP
 ```
 
-Normal happy-path'te agent bu state'ler arasında kullanıcıdan rutin onay
-istemeden ilerlemelidir.
+Normal happy-path'te agent bu state'ler arasında kullanıcıdan rutin onay istemeden ilerlemelidir.
 
-------------------------------------------------------------------------
+---
 
-## 2. Plan için ayrı Claude session gerekir mi?
+## 2. Execution role modeli
 
-Hayır.
+Agent identity ile execution role aynı şey değildir.
 
-`DISCOVER → EVIDENCE → PLAN → IMPLEMENT` aynı ana session içinde
-yürüyebilir.
+Canonical roller:
 
-Claude Code'un **Plan Mode** özelliği ile deterministic workflow
-içindeki `PLAN.md` aynı şey değildir.
-
-Claude Plan Mode, agent'ın o anda nasıl çalışacağını belirleyen bir
-çalışma modudur. Buna karşılık:
-
-``` text
-.agents/runs/TODO-123/PLAN.md
+```text
+full_lifecycle
+implementation_worker
 ```
 
-task'ın frozen ve denetlenebilir implementation contract'ıdır.
+Default davranış:
 
-Örnek:
+```text
+Normal Claude invocation
+→ full_lifecycle
 
-``` text
-Claude Plan Mode
-      ↓
+Normal Codex invocation
+→ full_lifecycle
+
+Explicit bounded worker invocation
+→ implementation_worker
+```
+
+Yani:
+
+```text
+Claude-only
+→ Claude = full_lifecycle
+
+Codex-only
+→ Codex = full_lifecycle
+
+Claude + Codex
+→ Claude = lifecycle owner / orchestrator
+→ Codex = implementation_worker
+```
+
+Önemli:
+
+> **Codex global olarak implementation-only değildir.**
+
+Codex yalnızca açıkça `implementation_worker` olarak çağrıldığında bounded worker olur.
+
+---
+
+## 3. Claude-only kullanım
+
+Claude tek başına bütün workflow'u yürütebilir:
+
+```text
+Claude
+  ↓
+TASK
 DISCOVER
-      ↓
 EVIDENCE
-      ↓
-PLAN.md
-      ↓
-freeze
-      ↓
-Plan Mode'dan çık
-      ↓
+PLAN
+FREEZE
 IMPLEMENT
-      ↓
 VERIFY
+REVIEW
+CODE DONE
+KNOWLEDGE
+STOP
 ```
 
-Bunun için yeni session açılmaz.
+### Linear — Claude-only günlük prompt
 
-------------------------------------------------------------------------
-
-## 3. Reviewer ve verifier ayrı session mı?
-
-Kullanıcının manuel olarak ayrı Claude terminal/session açması gerekmez.
-
-Reviewer ve verifier gerektiğinde bounded subagent/context olarak
-çalışabilir.
-
-``` text
-                    ┌─ code reviewer
-Main task session ──┤
-                    └─ verifier
-```
-
-Reviewer'a tüm session geçmişini vermek yerine yalnız gerekli context
-verilmelidir:
-
--   TASK ve acceptance criteria
--   frozen PLAN
--   ilgili evidence referansları
--   task diff'i
--   ilgili test sonuçları
-
-Verifier'ın context'i mümkünse daha da küçük tutulmalıdır.
-
-Reviewer/verifier, repository'nin gerçek verification komutlarının
-yerine geçmez.
-
-------------------------------------------------------------------------
-
-## 4. Agent ne zaman kullanıcıya soru sormalı?
-
-Workflow state geçişleri soru sebebi değildir.
-
-### Sormaması gereken örnek
-
-> PLAN tamamlandı. Implementation'a geçeyim mi?
-
-Workflow IMPLEMENT'a izin veriyorsa agent devam etmelidir.
-
-### Sorması gereken örnek
-
-> Acceptance criteria status code belirtmiyor. Mevcut API'lerde iki
-> farklı contract kullanılıyor ve authoritative kaynaklardan hangisinin
-> geçerli olduğu çözülemiyor. Hangisini uygulayalım?
-
-Agent yalnızca aşağıdaki gibi durumlarda durmalıdır:
-
--   önemli requirement belirsizliği,
--   authoritative evidence kaynakları arasında çözülemeyen çatışma,
--   geri döndürülemez/destructive ve onay gerektiren işlem,
--   task ve repository'den çözülemeyen önemli scope genişlemesi.
-
-------------------------------------------------------------------------
-
-# 5. Linear kullanan proje
-
-Linear task-management katmanıdır:
-
-``` text
-Linear
-  = Ne yapacağız?
-
-.agents/runs/
-  = Agent bunu hangi frozen contract altında yaptı?
-
-docs/wiki/
-  = Proje ne biliyor ve neden böyle karar verdi?
-```
-
-Örneğin Linear issue:
-
-``` text
-TODO-123 — Add todo completion endpoint
-
-PATCH /api/v1/todos/{id}/complete
-
-Acceptance Criteria:
-- Existing todo can be completed.
-- Missing todo returns 404.
-- Completing an already completed todo is idempotent.
-- Tests are included.
-```
-
-Bu issue için deterministic run:
-
-``` text
-.agents/runs/TODO-123/
-├── TASK.md
-├── EVIDENCE.md
-├── PLAN.md
-├── RUN.yaml
-├── RESULT.md
-└── review/
-```
-
-## Linear --- ideal günlük prompt
-
-### English
-
-``` text
+```text
 Work on Linear issue TODO-123.
 
 Follow this repository's AGENTS.md, CLAUDE.md, and deterministic workflow.
 
-Use TODO-123 as the task identity and execute the complete task lifecycle autonomously.
+Use TODO-123 as the task identity and execute the complete task lifecycle autonomously in full_lifecycle mode.
 
 Create or resume the corresponding deterministic run, capture the baseline when required, and proceed through DISCOVER, EVIDENCE, PLAN, freeze, IMPLEMENT, VERIFY, REVIEW, CODE DONE, and the required knowledge transaction until KNOWLEDGE DONE.
 
@@ -235,87 +167,20 @@ When the task reaches its required final state, update the task-management state
 Do not start another task.
 ```
 
-### Türkçe
+### Markdown task — Claude-only günlük prompt
 
-``` text
-Linear'daki TODO-123 issue'su üzerinde çalış.
-
-Bu repository'nin AGENTS.md, CLAUDE.md ve deterministic workflow kurallarını takip et.
-
-TODO-123'ü task identity olarak kullan ve task'ın tüm lifecycle'ını otonom olarak yürüt.
-
-İlgili deterministic run'ı oluştur veya mevcutsa devam ettir; gerektiğinde baseline al ve DISCOVER, EVIDENCE, PLAN, freeze, IMPLEMENT, VERIFY, REVIEW, CODE DONE ve gerekli knowledge transaction aşamalarından KNOWLEDGE DONE'a kadar ilerle.
-
-Progressive disclosure kullan. İlgisiz repository dosyalarını, wiki sayfalarını, historical run'ları, Linear issue'larını veya session geçmişini yükleme.
-
-Mevcut bir run'a devam ediyorsan tamamlanmış workflow aşamalarını tekrar yapma.
-
-Rutin workflow geçişleri için benden onay isteme. Yalnızca şu durumlarda sor:
-- önemli bir requirement belirsizliği,
-- authoritative evidence kaynakları arasında çatışma,
-- onay gerektiren geri döndürülemez veya destructive işlem,
-- task ve repository'den çözülemeyen önemli bir scope genişlemesi.
-
-Fırsat bulmuşken iyileştirme veya ilgisiz refactor yapma.
-
-Task gerekli final state'e ulaştığında, izin veriliyorsa task-management durumunu güncelle, verification kanıtlarını içeren kısa bir final rapor ver ve dur.
-
-Başka bir task'a geçme.
-```
-
-Bu prompt normal durumda tek başına yeterli olmalıdır.
-
-------------------------------------------------------------------------
-
-# 6. Linear kullanmayan proje
-
-Linear zorunlu değildir. Markdown tabanlı proje yönetimi kullanılabilir.
-
-Örnek:
-
-``` text
-docs/project/
-├── ROADMAP.md
-├── BACKLOG.md
-├── sprints/
-│   └── SPRINT-001.md
-└── tasks/
-    └── TODO-001.md
-```
-
-Task kaynağı:
-
-``` text
-docs/project/tasks/TODO-001.md
-```
-
-Task çalıştırılırken bu kaynak deterministic run'a normalize edilir:
-
-``` text
-docs/project/tasks/TODO-001.md
-        ↓
-.agents/runs/TODO-001/TASK.md
-```
-
-`docs/project/` proje yönetimi için, `.agents/runs/` execution contract
-için kullanılır.
-
-## Markdown task --- ideal günlük prompt
-
-### English
-
-``` text
+```text
 Work on project task TODO-001 defined in docs/project/tasks/TODO-001.md.
 
 Follow this repository's AGENTS.md, CLAUDE.md, and deterministic workflow.
 
-Use TODO-001 as the deterministic task identity.
+Use TODO-001 as the deterministic task identity and execute the complete task lifecycle autonomously in full_lifecycle mode.
 
-Create or resume the corresponding run and execute the complete lifecycle autonomously through DISCOVER, EVIDENCE, PLAN, freeze, IMPLEMENT, VERIFY, REVIEW, CODE DONE, and the required knowledge transaction until KNOWLEDGE DONE.
+Create or resume the corresponding run and continue through DISCOVER, EVIDENCE, PLAN, freeze, IMPLEMENT, VERIFY, REVIEW, CODE DONE, and the required knowledge transaction until KNOWLEDGE DONE.
 
-Treat the project task as the task-management source, but normalize the executable contract into the deterministic run according to repository policy.
+Treat the project task file as the task-management source and normalize the executable contract into the deterministic run according to repository policy.
 
-Use progressive disclosure and do not load unrelated backlog items, sprint documents, wiki pages, historical runs, or repository files.
+Use progressive disclosure. Do not load unrelated backlog items, sprint documents, wiki pages, historical runs, or repository files.
 
 Do not ask for approval between routine workflow states.
 
@@ -326,39 +191,487 @@ When complete, update the Markdown task/sprint status if repository policy permi
 Do not start another backlog item.
 ```
 
-### Türkçe
+---
 
-``` text
-docs/project/tasks/TODO-001.md içinde tanımlanan TODO-001 proje task'ı üzerinde çalış.
+## 4. Codex-only kullanım
+
+Codex de normal başlatıldığında `full_lifecycle` agent'tır.
+
+```text
+Codex
+  ↓
+TASK
+DISCOVER
+EVIDENCE
+PLAN
+FREEZE
+IMPLEMENT
+VERIFY
+REVIEW
+CODE DONE
+KNOWLEDGE
+STOP
+```
+
+Claude zorunlu değildir.
+
+### Linear — Codex-only günlük prompt
+
+```text
+Work on Linear issue TODO-123 in full_lifecycle mode.
+
+Follow AGENTS.md and the repository deterministic workflow.
+
+Use TODO-123 as the task identity.
+
+Create or resume the corresponding deterministic run and execute the complete lifecycle autonomously through DISCOVER, EVIDENCE, PLAN, freeze, IMPLEMENT, VERIFY, REVIEW, CODE DONE, and the required knowledge transaction until KNOWLEDGE DONE.
+
+Use progressive disclosure.
+Do not redo completed workflow states.
+Do not perform unrelated refactoring or opportunistic improvements.
+Do not ask for approval for routine workflow transitions.
+
+Ask only for a genuine material ambiguity, unresolved authoritative evidence conflict, approval-required irreversible action, or unavoidable material scope expansion.
+
+When complete, report the verification evidence and final state, update task-management state only if permitted, and stop.
+
+Do not start another task.
+```
+
+---
+
+# 5. Claude orchestrator + Codex implementation worker
+
+Bu modelde Claude lifecycle owner olarak kalır.
+
+Akış:
+
+```text
+Claude
+  TASK
+  DISCOVER
+  EVIDENCE
+  PLAN
+  FREEZE
+     ↓
+     ↓ explicit bounded dispatch
+     ↓
+Codex
+  implementation_worker
+  IMPLEMENT ONLY
+     ↓
+     ↓ return control
+     ↓
+Claude
+  VERIFY
+  REVIEW
+  CODE DONE
+  KNOWLEDGE
+  STOP
+```
+
+Claude şu aşamaların sahibidir:
+
+- task çözümleme
+- baseline
+- DISCOVER
+- EVIDENCE
+- PLAN
+- freeze
+- Codex'e implementation dispatch
+- VERIFY
+- REVIEW
+- bounded fix kararı
+- CODE DONE
+- delivery authorization
+- knowledge transaction
+
+Codex worker yalnızca:
+
+- frozen TASK/EVIDENCE/PLAN'ı tüketir
+- PLAN-authorized application scope içinde implement eder
+- focused implementation check'leri çalıştırabilir
+- implementation sonucu changed path'leri raporlar
+- control'ü Claude'a geri verir
+
+Worker şunları yapmaz:
+
+- DISCOVER'ı tekrar etmez
+- EVIDENCE oluşturmaz/değiştirmez
+- PLAN oluşturmaz/değiştirmez
+- freeze/refreeze yapmaz
+- VERIFY/REVIEW yapmaz
+- VERIFIED/REVIEWED/CODE_DONE işaretlemez
+- delivery yapmaz
+- wiki/knowledge transaction yapmaz
+- başka agent çağırmaz
+- recursive Codex delegation yapmaz
+
+---
+
+## 6. Claude orchestrator olarak nasıl başlatılır?
+
+Bu, önceki rehberde eksik kalan en önemli prompttur.
+
+Bu prompt Claude Code'a verilir.
+
+Claude task'ın orchestration'ını kendisi yürütür; implementation aşamasına gelince Codex'i explicit `implementation_worker` olarak çağırır; Codex döndükten sonra Claude VERIFY/REVIEW/CODE DONE akışını devam ettirir.
+
+### Linear — Claude orchestrator tek-shot prompt
+
+```text
+Work on Linear issue TODO-123 as the lifecycle orchestrator.
+
+Follow this repository's AGENTS.md, CLAUDE.md, and deterministic workflow.
+
+Use TODO-123 as the task identity and own the complete deterministic lifecycle.
+
+Create or resume the corresponding run, capture the baseline when required, and perform DISCOVER, EVIDENCE, PLAN, and freeze yourself.
+
+For application implementation, explicitly delegate ONLY the implementation phase to Codex using the repository's implementation_worker role.
+
+Do not ask Codex to rerun discovery, evidence gathering, planning, freezing, review, delivery, or knowledge work.
+
+When Codex returns, resume ownership of the same deterministic run yourself.
+
+Perform VERIFY and REVIEW yourself according to repository policy.
+
+If verification or review requires a bounded implementation fix, create a focused correction instruction and dispatch Codex again only as implementation_worker. Codex must fix only the authorized implementation scope and return control to you.
+
+You remain responsible for:
+- DISCOVER,
+- EVIDENCE,
+- PLAN,
+- freeze,
+- verification,
+- review,
+- bounded-fix decisions,
+- CODE DONE,
+- delivery authorization,
+- and the required knowledge transaction.
+
+Do not let the implementation worker become the workflow orchestrator.
+Do not let the worker delegate to another agent.
+Do not let the worker mark VERIFIED, REVIEWED, or CODE_DONE.
+
+Use repository state as the persistent source of truth. Do not depend on Codex having access to this Claude conversation.
+
+Use progressive disclosure. Do not load unrelated repository files, wiki pages, historical runs, Linear issues, or session history.
+
+Do not redo completed workflow states when resuming an existing run.
+
+Do not ask me to approve routine workflow transitions. Ask only when there is:
+- a material requirement ambiguity,
+- a conflict between authoritative evidence,
+- an irreversible or destructive action requiring approval,
+- or a material scope expansion that cannot be resolved from the task and repository.
+
+Do not perform opportunistic improvements or unrelated refactoring.
+
+Continue autonomously through the required workflow until KNOWLEDGE DONE.
+
+When complete, update task-management state only if permitted, give me a concise final report including verification evidence and any Codex implementation handoffs, and stop.
+
+Do not start another task.
+```
+
+### Türkçe karşılığı
+
+```text
+Linear'daki TODO-123 issue'su üzerinde lifecycle orchestrator olarak çalış.
 
 Bu repository'nin AGENTS.md, CLAUDE.md ve deterministic workflow kurallarını takip et.
 
-TODO-001'i deterministic task identity olarak kullan.
+TODO-123'ü task identity olarak kullan ve deterministic lifecycle'ın tamamının sahibi sen ol.
 
-İlgili run'ı oluştur veya mevcutsa devam ettir ve DISCOVER, EVIDENCE, PLAN, freeze, IMPLEMENT, VERIFY, REVIEW, CODE DONE ve gerekli knowledge transaction aşamalarından KNOWLEDGE DONE'a kadar tüm lifecycle'ı otonom olarak yürüt.
+İlgili run'ı oluştur veya mevcutsa devam ettir; gerektiğinde baseline al; DISCOVER, EVIDENCE, PLAN ve freeze aşamalarını kendin yürüt.
 
-Project task dosyasını task-management kaynağı olarak kabul et, ancak çalıştırılabilir contract'ı repository policy'sine göre deterministic run içine normalize et.
+Application implementation aşamasında YALNIZCA implementation işini repository'nin implementation_worker rolünü kullanarak Codex'e explicit olarak delege et.
 
-Progressive disclosure kullan; ilgisiz backlog item'larını, sprint dokümanlarını, wiki sayfalarını, historical run'ları veya repository dosyalarını yükleme.
+Codex'ten discovery, evidence, planning, freeze, review, delivery veya knowledge işlemlerini tekrar yapmasını isteme.
 
-Rutin workflow state'leri arasında benden onay isteme.
+Codex implementation'ı tamamlayıp döndüğünde aynı deterministic run'ın lifecycle ownership'ini tekrar sen sürdür.
 
-Yalnızca önemli bir belirsizlik, authoritative evidence çatışması, onay gerektiren geri döndürülemez işlem veya repository evidence ile çözülemeyen önemli bir scope genişlemesi varsa dur.
+VERIFY ve REVIEW aşamalarını repository policy'sine göre kendin yürüt.
 
-Tamamlandığında repository policy izin veriyorsa Markdown task/sprint durumunu güncelle, verification kanıtlarını ve final state'i raporla ve dur.
+Verification veya review sonucunda bounded bir implementation fix gerekiyorsa focused bir correction instruction oluştur ve Codex'i yalnız implementation_worker olarak tekrar çağır. Codex yalnız yetkili implementation scope içinde fix yapmalı ve control'ü sana geri vermeli.
 
-Başka bir backlog item'ına başlama.
+Şu aşamaların sahibi her zaman sensin:
+- DISCOVER,
+- EVIDENCE,
+- PLAN,
+- freeze,
+- verification,
+- review,
+- bounded-fix kararları,
+- CODE DONE,
+- delivery authorization,
+- gerekli knowledge transaction.
+
+Implementation worker'ın workflow orchestrator'a dönüşmesine izin verme.
+Worker'ın başka bir agent delege etmesine izin verme.
+Worker'ın VERIFIED, REVIEWED veya CODE_DONE işaretlemesine izin verme.
+
+Persistent source of truth olarak repository state'i kullan. Codex'in bu Claude conversation'ına erişebildiğini varsayma.
+
+Progressive disclosure kullan. İlgisiz repository dosyalarını, wiki sayfalarını, historical run'ları, Linear issue'larını veya session geçmişini yükleme.
+
+Mevcut bir run'a devam ediyorsan tamamlanmış workflow state'lerini tekrar yapma.
+
+Rutin workflow geçişleri için benden onay isteme. Yalnızca şu durumlarda sor:
+- önemli bir requirement belirsizliği,
+- authoritative evidence kaynakları arasında çatışma,
+- onay gerektiren geri döndürülemez/destructive işlem,
+- task ve repository'den çözülemeyen önemli bir scope genişlemesi.
+
+Fırsat bulmuşken iyileştirme veya ilgisiz refactor yapma.
+
+Gerekli workflow'u otonom şekilde KNOWLEDGE DONE'a kadar yürüt.
+
+Tamamlandığında, izin veriliyorsa task-management state'ini güncelle; verification evidence ve yapılan Codex implementation handoff'larını içeren kısa bir final rapor ver ve dur.
+
+Başka bir task'a geçme.
 ```
 
-------------------------------------------------------------------------
+---
 
-# 7. Session yarıda kapanırsa
+## 7. Markdown task — Claude orchestrator tek-shot prompt
+
+```text
+Work on project task TODO-001 defined in docs/project/tasks/TODO-001.md as the lifecycle orchestrator.
+
+Follow AGENTS.md, CLAUDE.md, and the repository deterministic workflow.
+
+Use TODO-001 as the deterministic task identity.
+
+Create or resume the corresponding run.
+Perform baseline, DISCOVER, EVIDENCE, PLAN, and freeze yourself.
+
+Delegate ONLY application implementation to Codex using the explicit implementation_worker role.
+
+Codex must consume the already-frozen TASK, EVIDENCE, and PLAN, implement only the authorized application scope, perform only focused implementation checks, and return control to you.
+
+After Codex returns, perform VERIFY and REVIEW yourself.
+
+If a bounded implementation correction is required, dispatch Codex again only as implementation_worker with a focused fix instruction.
+
+Do not let Codex perform planning, refreeze, review, CODE DONE, delivery, knowledge operations, or recursive delegation.
+
+You remain the lifecycle owner until the deterministic run reaches its required final state.
+
+Use progressive disclosure.
+Do not redo completed states.
+Do not perform unrelated refactoring.
+Do not ask for routine workflow approvals.
+
+When complete, update the Markdown task/sprint state only if repository policy permits it, report verification evidence and the final state, and stop.
+
+Do not start another backlog item.
+```
+
+---
+
+## 8. Codex implementation worker dispatch prompt
+
+Bu prompt orchestrator tarafından Codex'e verilir.
+
+```text
+Act as the implementation worker for the currently active deterministic task.
+
+You are a bounded implementation worker, not the workflow orchestrator.
+
+Consume the already-frozen TASK, EVIDENCE, and PLAN.
+
+Validate only the minimum persisted repository/run state necessary to ensure you are implementing the correct frozen task.
+
+Implement only the PLAN-authorized application scope.
+
+You MAY:
+- read the active run,
+- read the frozen TASK/EVIDENCE/PLAN,
+- inspect task-relevant repository files,
+- inspect current Git state,
+- modify PLAN-authorized application paths,
+- run focused implementation-level checks,
+- fix failures directly caused by your implementation when the fix remains inside frozen scope.
+
+You MUST NOT:
+- redo DISCOVER,
+- create or modify EVIDENCE,
+- create or modify PLAN,
+- amend or refreeze,
+- expand scope,
+- perform REVIEW,
+- mark VERIFIED,
+- mark REVIEWED,
+- mark CODE_DONE,
+- perform delivery,
+- commit or push,
+- update external task-management systems,
+- perform wiki or knowledge operations,
+- invoke another implementation worker,
+- delegate to another agent,
+- recursively invoke Codex,
+- start another task.
+
+If implementation requires a material planning decision, a path outside the frozen PLAN, conflicting authoritative evidence, or an unauthorized destructive/irreversible action:
+
+STOP and return the blocker to the orchestrator.
+
+Do not amend the contract yourself.
+
+When implementation is complete:
+1. report the exact changed paths,
+2. report the focused implementation checks you ran and their results,
+3. report any caveats,
+4. return control to the orchestrator.
+
+Stop after returning the implementation result.
+```
+
+---
+
+## 9. Bounded fix — Claude → Codex prompt
+
+Claude VERIFY veya REVIEW sırasında problem bulursa full workflow'u Codex'e devretmez.
+
+Sadece focused fix gönderir:
+
+```text
+Act as the implementation_worker for the currently active deterministic task.
+
+The orchestrator's verification/review found the following implementation issue:
+
+<INSERT EXACT FAILURE / REVIEW FINDING>
+
+Fix ONLY this issue within the existing frozen TASK, EVIDENCE, PLAN, and authorized application scope.
+
+Do not redo discovery, evidence, planning, or freezing.
+Do not expand scope.
+Do not perform review.
+Do not mark VERIFIED, REVIEWED, or CODE_DONE.
+Do not perform delivery or knowledge operations.
+Do not delegate to another agent.
+
+Run only the focused implementation checks necessary for this correction.
+
+If the fix requires a material plan/scope change, stop and return the blocker instead of changing the frozen contract.
+
+When the fix is complete, report:
+- changed paths,
+- exact correction made,
+- focused checks and results,
+- any blocker/caveat,
+
+then return control to the orchestrator and stop.
+```
+
+Akış:
+
+```text
+Claude VERIFY / REVIEW
+        ↓
+       FAIL
+        ↓
+Claude focused fix instruction
+        ↓
+Codex implementation_worker
+        ↓
+implementation-only fix
+        ↓
+return
+        ↓
+Claude VERIFY / REVIEW
+```
+
+Bu **bounded QA correction loop**'tur.
+
+Bu recursive orchestration değildir.
+
+Worker kendi kendini yeniden çağırmaz. Yeni worker invocation kararı orchestrator'a aittir.
+
+---
+
+# 10. Resume ile delegation aynı şey değildir
+
+Bu iki senaryo karıştırılmamalıdır.
+
+## A. Cross-agent full-lifecycle resume
+
+Claude session'ı kapanır veya limiti biter:
+
+```text
+Claude
+full_lifecycle
+    ↓
+session ends
+    ↓
+Codex normal açılır
+    ↓
+Codex = full_lifecycle
+    ↓
+aynı deterministic run'a devam eder
+```
+
+Burada Codex **worker değildir**.
+
+### Resume prompt
+
+```text
+Resume the currently active deterministic task in full_lifecycle mode.
+
+Follow AGENTS.md and the repository deterministic workflow.
+
+Resolve the active run from repository state.
+
+Validate only the persisted state required to safely continue, inspect the frozen TASK/EVIDENCE/PLAN and current Git state, determine the last valid workflow state, and continue autonomously from there.
+
+Do not recreate or redo completed workflow states.
+
+Do not rely on previous chat history.
+
+Continue until the task reaches its required final state or a genuine user decision is required.
+```
+
+---
+
+## B. Delegated implementation
+
+Claude session devam eder:
+
+```text
+Claude full_lifecycle/orchestrator
+        ↓
+Codex explicit implementation_worker
+        ↓
+Codex implementation
+        ↓
+return
+        ↓
+Claude VERIFY / REVIEW / ...
+```
+
+Burada Claude lifecycle owner olmaya devam eder.
+
+Özet:
+
+```text
+Normal Codex invocation
+→ full_lifecycle
+
+Explicit worker invocation
+→ implementation_worker
+```
+
+---
+
+# 11. Session yarıda kapanırsa
 
 Session'ın kapanması run'ın kaybolduğu anlamına gelmez.
 
-Örneğin:
+Örnek:
 
-``` text
+```text
 TODO-123
 ├─ BASELINE ✓
 ├─ DISCOVER ✓
@@ -368,56 +681,112 @@ TODO-123
 └─ IMPLEMENT %40
 ```
 
-Yeni Claude/Codex session'ı mevcut state'i repository'den
-çözebilmelidir.
-
-## Resume prompt
-
-### English
-
-``` text
-Resume the currently active deterministic task.
-
-Follow AGENTS.md, CLAUDE.md, and the repository workflow.
-
-Resolve the active run from repository state, inspect its frozen task/evidence/plan and current Git state, determine the last valid workflow state, and continue from there.
-
-Do not recreate or redo completed workflow states.
-
-Do not rely on previous chat history.
-
-Continue autonomously until the task reaches its required completion state or a genuine user decision is required.
-```
-
-### Türkçe
-
-``` text
-Şu anda aktif olan deterministic task'a devam et.
-
-AGENTS.md, CLAUDE.md ve repository workflow'unu takip et.
-
-Aktif run'ı repository state'inden bul; frozen task/evidence/plan ile mevcut Git state'ini incele, son geçerli workflow state'ini belirle ve oradan devam et.
-
-Tamamlanmış workflow aşamalarını yeniden oluşturma veya tekrar yapma.
-
-Önceki chat geçmişine güvenme.
-
-Task gerekli completion state'e ulaşana veya gerçekten kullanıcı kararı gerekene kadar otonom olarak devam et.
-```
-
-Bu özellik önemlidir:
+Yeni Claude/Codex session'ı mevcut state'i repository'den çözebilmelidir.
 
 > **Chat history convenience'tır; source of truth değildir.**
 
-------------------------------------------------------------------------
+Aynı deterministic run başka agent tarafından sürdürülebilir.
 
-# 8. CODE DONE ve KNOWLEDGE DONE
+---
 
-Kodun tamamlanması ile proje bilgisinin güncellenmesi iki ayrı
-transaction olarak düşünülür.
+# 12. Plan için ayrı Claude session gerekir mi?
 
-``` text
+Hayır.
+
+`DISCOVER → EVIDENCE → PLAN → IMPLEMENT` aynı ana session içinde yürüyebilir.
+
+Claude Code'un **Plan Mode** özelliği ile deterministic workflow içindeki `PLAN.md` aynı şey değildir.
+
+```text
+Claude Plan Mode
+= geçici agent interaction/behavior mode
+
+.agents/runs/<TASK-ID>/PLAN.md
+= frozen deterministic implementation contract
+```
+
+Claude Plan Mode kullanılabilir ama zorunlu değildir.
+
+Orchestrator + Codex modelinde de Claude:
+
+```text
+DISCOVER
+→ EVIDENCE
+→ PLAN
+→ FREEZE
+```
+
+yaptıktan sonra aynı Claude session'ında Codex worker dispatch eder ve dönüşte workflow'a devam eder.
+
+---
+
+# 13. Reviewer ve verifier ayrı session mı?
+
+Kullanıcının manuel olarak ayrı Claude terminal/session açması gerekmez.
+
+Reviewer ve verifier gerektiğinde bounded subagent/context olarak çalışabilir.
+
+```text
+                    ┌─ code reviewer
+Main task session ──┤
+                    └─ verifier
+```
+
+Reviewer context'i mümkün olduğunca bounded olmalıdır:
+
+- TASK ve acceptance criteria
+- frozen PLAN
+- ilgili evidence referansları
+- task diff'i
+- ilgili test sonuçları
+
+Verifier'ın context'i mümkünse daha da küçük tutulmalıdır.
+
+Reviewer/verifier gerçek repository verification komutlarının yerine geçmez.
+
+Claude orchestrator + Codex worker modelinde review/verifier ownership Claude tarafında kalır.
+
+---
+
+# 14. Worker blocker davranışı
+
+Worker aşağıdaki gibi material bir durum görürse kendisi karar verip contract'ı değiştirmez:
+
+- PLAN dışı application path gerekiyor
+- yeni material API kararı gerekiyor
+- architecture kararı gerekiyor
+- authoritative evidence çatışıyor
+- destructive/irreversible işlem gerekiyor
+- frozen contract güvenli implementation'a izin vermiyor
+
+Davranış:
+
+```text
+STOP
+↓
+REPORT BLOCKER
+↓
+RETURN TO ORCHESTRATOR
+```
+
+Yanlış davranış:
+
+```text
+PLAN değiştir
+→ refreeze
+→ scope genişlet
+→ implementasyona devam et
+```
+
+---
+
+# 15. CODE DONE ve KNOWLEDGE DONE
+
+Kodun tamamlanması ile proje bilgisinin güncellenmesi iki ayrı transaction'dır.
+
+```text
 Transaction A
+
 TASK
  ↓
 DISCOVER
@@ -433,8 +802,11 @@ VERIFY
 REVIEW
  ↓
 CODE DONE
+```
 
+```text
 Transaction B
+
 CODE RESULT
  ↓
 factual summary
@@ -448,143 +820,44 @@ relevant decisions / lessons
 KNOWLEDGE DONE
 ```
 
-Deterministic implementation sırasında wiki read-only'dir. Task kendi
-execution'ı sırasında geçmiş bilgisini değiştirmemelidir.
+Deterministic implementation sırasında wiki read-only'dir.
 
-> **Task kendi geçmişini değiştiremez. Ama bittikten sonra gelecek
-> task'lar için geçmiş olur.**
+> **Task kendi geçmişini değiştiremez. Ama bittikten sonra gelecek task'lar için geçmiş olur.**
 
-Eğer repository workflow'un final completion state'i `KNOWLEDGE DONE`
-ise agent'ın CODE DONE'da:
+Claude orchestrator + Codex worker modelinde knowledge transaction orchestrator tarafında kalır.
 
-> Wiki'yi de güncelleyeyim mi?
+Codex worker wiki veya knowledge transaction yapmaz.
 
-diye sormaması gerekir. Workflow zaten devam etmesini söylüyorsa devam
-etmelidir.
+---
 
-------------------------------------------------------------------------
+# 16. Agent ne zaman kullanıcıya soru sormalı?
 
-# 9. Recovery prompt --- agent gereksiz yere CODE DONE'da durursa
+Workflow state geçişleri soru sebebi değildir.
 
-Bu normal happy-path değildir. Agent workflow'u erken durdurduysa
-kullanılabilir.
+Yanlış:
 
-### English
+> PLAN tamamlandı. Implementation'a geçeyim mi?
 
-``` text
-Continue the current task from its CODE DONE state.
+Yanlış:
 
-Complete the required knowledge transaction according to the repository policy.
+> Codex implementation'ı tamamladı. Verify'a geçeyim mi?
 
-Use the existing LLM Wiki workflow, keep the update proportional to the actual task, run the required wiki lint process, resolve relevant findings without inventing facts, and continue until KNOWLEDGE DONE.
+Workflow izin veriyorsa orchestrator devam etmelidir.
 
-Do not modify application code unless a genuine inconsistency requires my decision.
+Agent yalnızca şu durumlarda durmalıdır:
 
-Report the final state and stop.
-```
+- önemli requirement belirsizliği
+- authoritative evidence kaynakları arasında çözülemeyen çatışma
+- geri döndürülemez/destructive ve onay gerektiren işlem
+- task/repository evidence ile çözülemeyen material scope genişlemesi
 
-### Türkçe
+---
 
-``` text
-Mevcut task'a CODE DONE durumundan devam et.
-
-Repository policy'sine göre gerekli knowledge transaction'ı tamamla.
-
-Mevcut LLM Wiki workflow'unu kullan, güncellemeyi gerçekten yapılan task ile orantılı tut, gerekli wiki lint sürecini çalıştır, ilgili bulguları bilgi uydurmadan çöz ve KNOWLEDGE DONE'a kadar devam et.
-
-Gerçek bir tutarsızlık benim kararımı gerektirmediği sürece application code'u değiştirme.
-
-Final state'i raporla ve dur.
-```
-
-------------------------------------------------------------------------
-
-# 10. Final completion kontrolü
-
-Normal workflow bunu zaten sağlamalıdır. Şüpheli bir durumda read-only
-final kontrol istenebilir.
-
-### English
-
-``` text
-Perform a final read-only completion check for the current task.
-
-Confirm that the deterministic run reached its required final state, required verification and review gates passed, there are no unexplained or unauthorized changes, and no task requirement remains incomplete.
-
-Do not make new improvements, perform unrelated refactoring, or start another task.
-
-If everything is complete, give me a concise final summary and stop.
-```
-
-### Türkçe
-
-``` text
-Mevcut task için son bir read-only completion kontrolü yap.
-
-Deterministic run'ın gerekli final state'e ulaştığını, gerekli verification ve review gate'lerinin geçtiğini, açıklanamayan veya yetkisiz değişiklik bulunmadığını ve task requirement'larından hiçbirinin eksik kalmadığını doğrula.
-
-Yeni iyileştirme yapma, ilgisiz refactor yapma veya başka bir task'a başlama.
-
-Her şey tamamlandıysa kısa bir final özet ver ve dur.
-```
-
-------------------------------------------------------------------------
-
-# 11. Örnek gerçek session akışı
-
-İdeal durumda kullanıcı-agent konuşması uzun olmamalıdır.
-
-``` text
-USER
-│
-│ Work on Linear issue TODO-123...
-│
-▼
-AGENT
-│
-├─ issue'yu çözer
-├─ run oluşturur/resume eder
-├─ baseline alır
-├─ discover yapar
-├─ evidence oluşturur
-├─ plan oluşturur
-├─ freeze eder
-├─ implement eder
-├─ verify eder
-├─ review/verifier gate'lerini tamamlar
-├─ CODE DONE
-├─ knowledge transaction
-├─ KNOWLEDGE DONE
-├─ task-management durumunu günceller
-│
-▼
-Final report
-│
-▼
-STOP
-```
-
-Kullanıcının şunları sırayla yazması hedef değildir:
-
-``` text
-Plan yap.
-Devam et.
-Implement et.
-Test et.
-Review et.
-Wiki'yi güncelle.
-Devam et.
-```
-
-Bunlar repository workflow'unun sorumluluğudur.
-
-------------------------------------------------------------------------
-
-# 12. Task bittikten sonra aynı session'da yeni task?
+# 17. Task bittikten sonra aynı session'da yeni task?
 
 Tercih edilen kullanım: **hayır**.
 
-``` text
+```text
 Session #1
 └─ TODO-123
    └─ DONE
@@ -594,42 +867,23 @@ Session #2
    └─ DONE
 ```
 
-Bunun nedeni determinism zorunluluğundan çok context hijyenidir.
+Bu determinism zorunluluğundan çok context hijyenidir.
 
-Yeni task'ın önceki task'ın uzun conversation history'sine ihtiyacı
-olmamalıdır. Gerekli bilgi:
+> **1 task = 1 session bir kullanım tercihi; 1 task = 1 deterministic run sistem kuralıdır.**
 
-``` text
-Git
-+ repository
-+ canonical docs
-+ task
-+ gerektiğinde wiki
-```
+Claude orchestrator kullanılıyorsa da yeni Linear/Markdown task için yeni ana Claude session tercih edilir.
 
-üzerinden yeniden bulunmalıdır.
+---
 
-Bu nedenle:
+# 18. Token ve context davranışı
 
-> **1 task = 1 session bir kullanım tercihi; 1 task = 1 run sistem
-> kuralıdır.**
-
-Çok küçük ve birbirine sıkı bağlı işler için aynı session teknik olarak
-mümkün olsa da her task yine ayrı run olmalı ve önceki task tamamen
-tamamlanmadan sonraki task başlatılmamalıdır.
-
-------------------------------------------------------------------------
-
-# 13. Token ve context açısından davranış
-
-Deterministic workflow tüm control plane'i her task'ta modele yüklemek
-anlamına gelmez.
+Deterministic workflow tüm control plane'i her task'ta modele yüklemek anlamına gelmez.
 
 Progressive disclosure uygulanmalıdır.
 
 Başlangıçta:
 
-``` text
+```text
 TASK
 + ilgili repository code
 + ilgili tests
@@ -639,7 +893,7 @@ yeterliyse wiki açılmaz.
 
 Gerektiğinde:
 
-``` text
+```text
 index
  ↓
 ilgili decision
@@ -649,184 +903,246 @@ ilgili lesson
 gerekirse source
 ```
 
-şeklinde ilerlenir.
-
 Yüklenmemesi gerekenler:
 
--   tüm `.agents/**`
--   tüm `docs/wiki/**`
--   eski run'ların tamamı
--   bütün Linear backlog'u
--   bütün sprint geçmişi
--   gereksiz conversation history
--   task ile ilgisiz capability/skill dokümanları
+- tüm `.agents/**`
+- tüm `docs/wiki/**`
+- eski run'ların tamamı
+- bütün Linear backlog'u
+- bütün sprint geçmişi
+- gereksiz conversation history
+- task ile ilgisiz capability/skill dokümanları
 
-Prensip:
+> **Determinism must not require loading the entire control plane or knowledge base into model context.**
 
-> **Determinism must not require loading the entire control plane or
-> knowledge base into model context.**
+Bu özellikle orchestrator + worker kullanımında önemlidir:
 
-------------------------------------------------------------------------
+Codex'e Claude'un bütün session geçmişi gönderilmez.
 
-# 14. Kısa kullanım özeti
-
-## Linear
-
-``` text
-Yeni session aç
-→ Linear issue ID ver
-→ agent lifecycle'ı otonom tamamlasın
-→ final report
-→ session kapat
-```
-
-## Markdown task
-
-``` text
-Yeni session aç
-→ task dosyasını/ID'sini ver
-→ agent lifecycle'ı otonom tamamlasın
-→ task/sprint state güncellensin
-→ final report
-→ session kapat
-```
-
-## Session yarıda kesildi
-
-``` text
-Yeni session
-→ active run'ı repository'den çöz
-→ frozen state'i oku
-→ kaldığı yerden devam et
-```
-
-## Agent rutin onay istedi
-
-Workflow cevabı zaten belirliyorsa onay verme döngüsü oluşturmak yerine
-agent'a mevcut state'ten otonom devam etmesini söyle.
-
-------------------------------------------------------------------------
-
-# 15. Ana prensipler
-
-1.  **1 task = 1 deterministic run.**
-2.  Tercihen **1 task = 1 ana session.**
-3.  Plan ve implementation için manuel ayrı session gerekmez.
-4.  Session state değildir.
-5.  Chat geçmişi source of truth değildir.
-6.  Rutin state geçişlerinde kullanıcı onayı gerekmez.
-7.  Reviewer/verifier bounded context ile çalışır.
-8.  CODE DONE ile KNOWLEDGE DONE ayrıdır.
-9.  Agent final state'e ulaştığında durur.
-10. Yeni task tercihen temiz bir session'da başlar.
-11. Linear/Markdown task-management katmanıdır; deterministic run
-    execution katmanıdır.
-12. Küçük task küçük context, küçük plan, küçük diff ve odaklı
-    verification üretmelidir.
-
-------------------------------------------------------------------------
-
-# 16. Execution role: resume mi, delegation mı?
-
-Agent identity ile execution role aynı şey değildir. Normal Claude ve
-normal Codex invocation'ı `full_lifecycle` rolündedir: ikisi de TASK'tan
-CODE DONE'a kadar aynı deterministic run'ı tek başına yürütebilir.
+Codex şunları tüketir:
 
 ```text
-Claude-only  → Claude: full_lifecycle
-Codex-only   → Codex: full_lifecycle
+frozen TASK
++ relevant EVIDENCE
++ frozen PLAN
++ task-relevant repository state
 ```
 
-`implementation_worker` yalnızca orchestrator'un açıkça verdiği bounded
-invocation'dır. Örneğin Claude plan/freeze yapıp Codex'i
-`AGENT_ROLE=implementation_worker` ile çağırabilir. Codex yalnız frozen
-TASK/EVIDENCE/PLAN içindeki implementation'ı yapar ve Claude'a döner;
-VERIFY, REVIEW ve CODE DONE Claude'da kalır.
+---
 
-## Resume ≠ delegation
+# 19. Hangi modeli ne zaman kullanacağım?
 
-**Cross-agent resume** örneğinde Claude session'ı biter ve Codex normal
-başlatılırsa Codex `full_lifecycle` olur; repository state'ten aynı run'ı
-okur ve tamamlanmış DISCOVER/PLAN aşamalarını tekrarlamadan devam eder.
-
-**Delegation** örneğinde Claude lifecycle owner olarak kalır ve Codex
-açık worker rolüyle yalnız implementation yapar. Yani:
+## Sadece Claude
 
 ```text
-1 task = 1 deterministic run.
-Session/model = persistent workflow state değildir.
+Claude'u normal aç
+→ full_lifecycle
+→ tek-shot task promptu ver
 ```
 
-Kalıcı kaynak Git ve `.agents/runs/<TASK-ID>/` içeriğidir; agent'ların
-birbirinin chat geçmişine erişmesi gerekmez.
-
-## Delegated worker sınırı ve bounded fix
-
-Worker DISCOVER/PLAN/EVIDENCE/freeze/review/CODE DONE/delivery/knowledge
-işlemi yapmaz ve başka agent delege etmez. PLAN dışı path, material API
-veya architecture kararı, çelişkili evidence ya da yetkisiz irreversible
-işlem görürse durur ve blocker'ı orchestrator'a döndürür.
+## Sadece Codex
 
 ```text
-Claude VERIFY/REVIEW fail
-→ Claude focused fix instruction
-→ Codex implementation_worker
-→ implementation-only fix
+Codex'i normal aç
+→ full_lifecycle
+→ tek-shot task promptu ver
+```
+
+## Claude planlasın/review etsin, Codex kod yazsın
+
+```text
+Claude'u normal aç
+→ Claude orchestrator promptu ver
+→ Claude DISCOVER/EVIDENCE/PLAN/FREEZE
+→ Claude Codex'i implementation_worker olarak çağırır
+→ Codex implement eder ve döner
 → Claude VERIFY/REVIEW
+→ gerekirse bounded Codex fix
+→ Claude CODE DONE / knowledge
 ```
 
-Bu bounded QA loop'tur; worker kendi kendini yeniden çağırmaz.
-
-### Cross-agent full-lifecycle resume prompt
-
-English:
+## Claude limitine geldim, Codex devam etsin
 
 ```text
-Resume the currently active deterministic task in full-lifecycle mode.
+Codex'i normal aç
+→ implementation_worker verme
+→ full_lifecycle resume promptu ver
+→ repository state'ten aynı run'a devam etsin
+```
 
-Resolve the active run from repository state, validate only the required persisted state, determine the last valid workflow state, and continue autonomously from there.
+Bu son durum delegated implementation değildir.
 
-Do not redo completed workflow states.
+---
+
+# 20. Kısa copy/paste prompt kataloğu
+
+## A. Claude-only
+
+```text
+Work on <TASK> in full_lifecycle mode.
+
+Follow AGENTS.md, CLAUDE.md, and the deterministic workflow.
+Create or resume the deterministic run and complete the required lifecycle autonomously.
+Do not redo completed states.
+Use progressive disclosure.
+Do not ask for routine workflow approvals.
+Do not perform unrelated improvements.
+Stop when the required final state is reached.
+```
+
+## B. Codex-only
+
+```text
+Work on <TASK> in full_lifecycle mode.
+
+Follow AGENTS.md and the deterministic workflow.
+Create or resume the run and continue autonomously through the required lifecycle.
+Do not redo completed states.
 Do not rely on previous chat history.
+Do not perform unrelated improvements.
+Stop at the required final state.
 ```
 
-Türkçe:
+## C. Claude orchestrator + Codex
 
 ```text
-Mevcut aktif deterministic task'a full_lifecycle modunda devam et.
+Work on <TASK> as the lifecycle orchestrator.
 
-Active run'ı repository state'ten çöz, yalnız gerekli kalıcı state'i doğrula, son geçerli workflow state'ini belirle ve buradan otonom devam et.
+Own DISCOVER, EVIDENCE, PLAN, freeze, VERIFY, REVIEW, CODE DONE, delivery decisions, and knowledge work yourself.
 
-Tamamlanmış workflow state'lerini tekrar yapma.
-Önceki chat geçmişine dayanma.
+Delegate ONLY application implementation to Codex using the explicit implementation_worker role.
+
+After Codex returns, continue the same run yourself.
+If a bounded implementation correction is required, dispatch Codex again only as implementation_worker with a focused fix instruction.
+
+Do not let the worker plan, refreeze, review, deliver, perform knowledge work, or delegate further.
+
+Continue autonomously until the required final state and stop.
 ```
 
-### Delegated implementation worker prompt
-
-English:
+## D. Codex worker
 
 ```text
-Act as the implementation worker for the currently active deterministic task.
+Act as implementation_worker for the currently active deterministic task.
 
-Consume the already-frozen TASK, EVIDENCE, and PLAN. Implement only the authorized application scope.
+Consume the frozen TASK, EVIDENCE, and PLAN.
+Implement only the authorized application scope.
+Do not plan, refreeze, review, deliver, modify knowledge, or delegate.
 
-Do not redo discovery or planning. Do not review, mark CODE DONE, deliver, modify knowledge, or delegate further.
+If material scope/planning change is required, return a blocker.
 
-If the implementation requires a material planning or scope change, stop and return the blocker.
-
-When implementation is complete, report the changed paths and focused implementation checks, then return control to the orchestrator.
+Report changed paths and focused checks, return control to the orchestrator, and stop.
 ```
 
-Türkçe:
+## E. Cross-agent resume
 
 ```text
-Mevcut aktif deterministic task için implementation worker olarak davran.
+Resume the currently active deterministic task in full_lifecycle mode.
 
-Önceden freeze edilmiş TASK, EVIDENCE ve PLAN'ı kullan. Yalnız yetkili application scope'u uygula.
+Resolve the active run from repository state, determine the last valid workflow state, and continue from there.
 
-Discovery veya planning'i tekrar yapma. Review, CODE DONE, delivery, knowledge değişikliği veya başka delegation yapma.
-
-Implementation material bir planning veya scope değişikliği gerektirirse dur ve blocker'ı döndür.
-
-Implementation bitince changed path'leri ve odaklı implementation check'lerini raporla, sonra control'ü orchestrator'a döndür.
+Do not redo completed states.
+Do not rely on previous chat history.
+Continue autonomously until the required final state or a genuine user decision is required.
 ```
+
+## F. Bounded fix
+
+```text
+Act as implementation_worker for the currently active task.
+
+Fix ONLY this verification/review finding:
+
+<FINDING>
+
+Stay inside the frozen TASK/EVIDENCE/PLAN and authorized scope.
+Do not plan, refreeze, review, mark CODE DONE, deliver, modify knowledge, or delegate.
+
+Run focused implementation checks, report the correction and changed paths, return control to the orchestrator, and stop.
+```
+
+---
+
+# 21. Ana prensipler
+
+1. **1 task = 1 deterministic run.**
+2. Tercihen **1 task = 1 ana session.**
+3. Session persistent state değildir.
+4. Chat geçmişi source of truth değildir.
+5. Agent identity ile execution role aynı şey değildir.
+6. Claude normal invocation'da `full_lifecycle` çalışabilir.
+7. Codex normal invocation'da `full_lifecycle` çalışabilir.
+8. `implementation_worker` yalnız explicit bounded invocation'dır.
+9. Claude orchestrator olduğunda lifecycle ownership Claude'da kalır.
+10. Codex worker yalnız frozen implementation contract'ını uygular.
+11. Worker kendi scope'unu genişletmez.
+12. Worker review/CODE DONE/delivery/knowledge yapmaz.
+13. Worker recursive delegation yapmaz.
+14. Resume ile delegation farklı kavramlardır.
+15. Claude → Codex normal resume durumunda Codex `full_lifecycle` olabilir.
+16. Claude → Codex delegated implementation durumunda Codex `implementation_worker` olur.
+17. Bounded fix loop orchestrator tarafından kontrol edilir.
+18. Reviewer/verifier bounded context ile çalışır.
+19. CODE DONE ile KNOWLEDGE DONE ayrıdır.
+20. Linear/Markdown task-management katmanıdır; deterministic run execution katmanıdır.
+21. Progressive disclosure kullanılır.
+22. Küçük task küçük context, küçük plan, küçük diff ve odaklı verification üretmelidir.
+23. Agent final state'e ulaştığında durur.
+24. Yeni task tercihen temiz bir ana session'da başlar.
+
+---
+
+# 22. En pratik kullanım özeti
+
+Senin Claude + Codex kullanımında günlük akış:
+
+```text
+1. Claude Code'u aç.
+
+2. Claude'a:
+   "Work on Linear issue TODO-123 as the lifecycle orchestrator..."
+   promptunu ver.
+
+3. Claude:
+   DISCOVER
+   EVIDENCE
+   PLAN
+   FREEZE
+
+4. Claude Codex'i:
+   AGENT_ROLE=implementation_worker
+   sınırıyla çağırır.
+
+5. Codex:
+   IMPLEMENT
+   focused checks
+   return
+
+6. Claude:
+   VERIFY
+   REVIEW
+
+7. Problem varsa:
+   Claude → bounded fix → Codex worker → return
+
+8. Claude:
+   CODE DONE
+   required knowledge transaction
+   KNOWLEDGE DONE
+   final report
+   STOP
+```
+
+Kullanıcının tek tek:
+
+```text
+plan yap
+codex'i çağır
+verify et
+review yap
+wiki'yi güncelle
+```
+
+demesi hedef değildir.
+
+Doğru orchestrator promptu verildiğinde Claude bütün akışı kendi yönetmelidir.
