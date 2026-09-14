@@ -31,7 +31,14 @@ Read its TASK, EVIDENCE, PLAN, then DISCOVER read-only. IMPLEMENT requires a val
 ./scripts/agent.sh verify-scope <TASK-ID>
 ```
 
-`.agents/ACTIVE_RUN` must name exactly one existing run. The YAML policy in `.agents/modes/` is machine-readable; the shared Markdown files explain the rules. Templates for the next run live in `.agents/templates/`.
+The checked-in template intentionally leaves `.agents/ACTIVE_RUN` empty. `status` then reports `active_task=none` and implementation is blocked. A real application task explicitly sets exactly one existing run ID, records its dirty-worktree baseline, then proceeds:
+
+```sh
+./scripts/agent.sh baseline <TASK-ID>
+./scripts/agent.sh freeze <TASK-ID>
+```
+
+The YAML policy in `.agents/modes/` is machine-readable; the shared Markdown files explain the rules. Templates for the next run live in `.agents/templates/`.
 
 ## Capability and knowledge boundaries
 
@@ -52,13 +59,21 @@ See [.agents/ENFORCEMENT.md](.agents/ENFORCEMENT.md) for script-enforced, workfl
 ./scripts/agent.sh status
 ./scripts/agent.sh validate EXAMPLE-001
 ./scripts/agent.sh verify-freeze EXAMPLE-001
-./scripts/agent.sh verify-scope EXAMPLE-001
 ./scripts/wiki-lint.sh
 ```
 
-EXAMPLE-001 is a small task-registry lookup feature with frozen evidence, plan scope, review, verifier, and result artifacts.
+EXAMPLE-001 is a small task-registry lookup feature with frozen evidence, plan scope, review, verifier, and result artifacts. It predates task-start baselines, so its scope check is intentionally unavailable as historical reference evidence.
+
+## Adopt in another repository
+
+1. Copy and adapt `AGENTS.md`, `CLAUDE.md`, `.agents/`, and `scripts/agent.sh`.
+2. Adapt `scripts/verify.sh`, engineering guidance, and verification rules to the real stack.
+3. Keep `ACTIVE_RUN` empty initially; create and explicitly activate the first real task run.
+4. Remove `EXAMPLE-001` when it is no longer useful as local documentation, or retain it only as a reference.
+5. Initialize/adapt `docs/wiki/` with the existing LLM Wiki skill, then use `/wiki-ingest` only after CODE DONE.
+
+vibecosystem remains external capability infrastructure: adapt its installed capabilities; do not copy or reimplement it.
 
 ## Maintaining this template
 
 Normal application tasks use the workflow. Explicit user-requested maintenance of this control-plane/example repository may update the template directly without creating another demonstration run. Git history records those template changes; `.agents/runs/` stays focused on meaningful examples.
-

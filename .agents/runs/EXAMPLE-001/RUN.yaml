@@ -4,6 +4,10 @@ task:
 repository:
   sha: eb2547a
 
+# This historical reference predates task-start dirty-worktree baselines.
+baseline:
+  status: legacy_not_captured
+
 execution:
   mode: deterministic
   profile: core

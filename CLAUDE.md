@@ -1,6 +1,6 @@
 # Claude Code adapter for the shared control plane
 
-Claude Code follows `AGENTS.md`: resolve machine policy and the one active task, DISCOVER read-only, freeze evidence/plan, then implement only after `agent.sh verify-freeze` passes.
+Claude Code follows `AGENTS.md`: resolve machine policy and the active task. The checked-in empty selector is a valid no-task state that blocks implementation; an active application task proceeds through read-only DISCOVER, baseline capture, evidence/plan freeze, and `agent.sh verify-freeze` before implementation.
 
 Claude features are subordinate to that protocol:
 

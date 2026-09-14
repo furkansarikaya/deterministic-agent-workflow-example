@@ -1,6 +1,8 @@
 mode: deterministic
 task:
   required: true
+baseline:
+  required_before_implementation: true
 evidence:
   required: true
   frozen_before_implementation: true
@@ -39,4 +41,3 @@ dependencies:
   changes_require_task_authorization: true
 architecture:
   autonomous_changes: false
-

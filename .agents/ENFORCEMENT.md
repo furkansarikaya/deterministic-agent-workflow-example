@@ -2,10 +2,11 @@
 
 | Rule | Classification | Mechanism |
 |---|---|---|
-| One active deterministic task | Script-enforced | `agent.sh status` rejects blank, malformed, or missing ACTIVE_RUN targets. |
+| Active task selection | Script-enforced | An empty checked-in `ACTIVE_RUN` reports `active_task=none`; malformed/missing targets fail and implementation commands require an explicit valid task. |
 | Valid mode / effective policy | Script-enforced | `agent.sh effective` reads YAML only from the allowlisted mode directory. |
 | Task, evidence, plan, policy freeze | Script-enforced | SHA-256 values in `RUN.yaml`; `agent.sh verify-freeze` rejects mismatch. |
-| Authorized scope and AC mapping | Script-enforced | `agent.sh verify-scope` validates plan mappings and changed tracked/untracked/deleted paths. |
+| Authorized scope and AC mapping | Script-enforced | `agent.sh verify-scope` validates plan mappings and task-introduced tracked/untracked/deleted paths. |
+| Dirty-worktree baseline | Script-enforced | `agent.sh baseline` stores a base SHA and regular-file SHA-256 fingerprints. An unchanged user-owned dirty file is excluded; a later change is checked against scope. |
 | Required run artifacts | Script-enforced | `agent.sh validate`. |
 | Build/tests/static checks | Script-enforced | `verify.sh` and verification artifact. |
 | Wiki structural integrity | Script-enforced | `wiki-lint.sh` reports, never rewrites. |
@@ -16,3 +17,9 @@
 | User confirmation for destructive/external actions | Agent/platform policy | Documents require it; scripts do not authorize actions. |
 
 Never describe policy-only behavior as technically disabled.
+
+## Evidence strength
+
+Hashes, policy selection, base SHA, and baseline fingerprints are machine-verifiable. Worker roles, worker identity, and reviewer/verifier independence are declared workflow evidence unless the host platform supplies auditable identities. Baseline hashes prove that a file changed after task start, not that an authorized edit semantically preserved every part of user-owned work; reconciliation remains an agent and review obligation.
+
+`EXAMPLE-001` is a historical reference with `baseline.status: legacy_not_captured`; validation accepts that explicit marker, while live scope verification is intentionally unavailable for it. Its recorded policy hash is retained as historical evidence; only this marker permits reporting that the current policy has since changed. Live runs always fail a policy-hash mismatch.

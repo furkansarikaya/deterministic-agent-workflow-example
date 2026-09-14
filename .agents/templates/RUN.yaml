@@ -1,0 +1,21 @@
+# `agent.sh baseline <TASK-ID>` replaces this pending block with captured
+# base-SHA and file fingerprints; it never stores file contents.
+task:
+  id: <TASK-ID>
+
+repository:
+  sha: <BASELINE-REPOSITORY-SHA>
+
+execution:
+  mode: deterministic
+  profile: core
+  state: PLANNING
+
+baseline:
+  status: pending
+
+freeze:
+  task_sha256: PENDING
+  evidence_sha256: PENDING
+  plan_sha256: PENDING
+  policy_sha256: PENDING
