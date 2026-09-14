@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 
+root=$(CDPATH= cd "$(dirname "$0")/.." && pwd)
 wiki_root=docs/wiki
 report=$wiki_root/lint-report.md
 tmp_file=/tmp/wiki-lint.$$
@@ -27,12 +28,29 @@ for page in $pages; do
     echo "- ERROR missing source metadata: \`$page\`" >> "$tmp_file"
     errors=$((errors + 1))
   fi
+  source_path=$(sed -n 's/^source: //p' "$page" | head -1)
+  if [ -n "$source_path" ] && [ ! -e "$root/$source_path" ]; then
+    echo "- ERROR nonexistent provenance source: \`$page\` → \`$source_path\`" >> "$tmp_file"
+    errors=$((errors + 1))
+  fi
   if grep -q '^status: ' "$page"; then
     status=$(sed -n 's/^status: //p' "$page" | head -1)
-    case "$status" in current|accepted|archived) ;; *)
+    case "$status" in current|accepted|archived|contradicted) ;; *)
       echo "- ERROR invalid status \`$status\`: \`$page\`" >> "$tmp_file"
       errors=$((errors + 1))
     esac
+  fi
+  if grep -q '^status: contradicted' "$page" && ! grep -q '^contradicts: ' "$page"; then
+    echo "- ERROR contradicted page lacks contradicts metadata: \`$page\`" >> "$tmp_file"
+    errors=$((errors + 1))
+  fi
+done
+
+task_refs=$(grep -rhoE 'EXAMPLE-[0-9]{3}' "$wiki_root" --include='*.md' | sort -u || true)
+for task_ref in $task_refs; do
+  if [ ! -d "$root/.agents/runs/$task_ref" ]; then
+    echo "- ERROR nonexistent task reference: \`$task_ref\`" >> "$tmp_file"
+    errors=$((errors + 1))
   fi
 done
 

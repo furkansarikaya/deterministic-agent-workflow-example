@@ -1,0 +1,42 @@
+mode: deterministic
+task:
+  required: true
+evidence:
+  required: true
+  frozen_before_implementation: true
+plan:
+  required: true
+  frozen_before_implementation: true
+scope:
+  frozen: true
+  unexpected_files: block
+wiki:
+  read: true
+  write_during_code_transaction: false
+  dynamic_unrelated_retrieval: false
+  write_after_code_done: true
+memory:
+  read: false
+  write: false
+dynamic_recall:
+  enabled: false
+prompt_auto_improver:
+  enabled: false
+self_learning:
+  read_during_run: false
+  write: deferred
+orchestration:
+  swarm: false
+  max_implementation_workers: 1
+review:
+  required: true
+  independent: true
+verification:
+  required: true
+  independent_verifier: true
+  max_bounded_fix_attempts: 2
+dependencies:
+  changes_require_task_authorization: true
+architecture:
+  autonomous_changes: false
+

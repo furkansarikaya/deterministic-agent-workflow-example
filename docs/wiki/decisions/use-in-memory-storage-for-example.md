@@ -20,5 +20,5 @@ A file store would add persistence behavior; a database would add infrastructure
 
 ## Consequences
 
-Tasks disappear when the process ends. That limitation is intentional and documented by [[architecture-overview]].
+Tasks disappear when the process ends. That limitation is intentional and documented by [[architecture-overview]]. EXAMPLE-001 is constrained to focused registry behavior.
 

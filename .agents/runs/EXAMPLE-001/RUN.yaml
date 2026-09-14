@@ -1,34 +1,64 @@
-task: EXAMPLE-001
+task:
+  id: EXAMPLE-001
 
-repo:
-  sha: "unborn repository; no commit ID exists"
+repository:
+  sha: PENDING-V2-BASELINE
 
 execution:
   mode: deterministic
   profile: core
-  state: CODE DONE
+  state: PLANNED
 
-wiki:
-  repository_sha: "unborn repository; no commit ID exists"
+freeze:
+  task_sha256: PENDING
+  evidence_sha256: PENDING
+  plan_sha256: PENDING
+  policy_sha256: PENDING
+
+knowledge:
+  repository_sha: PENDING-V2-BASELINE
   evidence:
-    entities:
-      - task-registry
-    decisions:
-      - use-in-memory-storage-for-example
-    lessons:
-      - validate-input-before-state-change
+    entities: [task-registry]
+    decisions: [use-in-memory-storage-for-example]
+    lessons: [validate-input-before-state-change]
+    concepts: [engineering-determinism, two-transaction-model]
+    sources: [architecture-overview]
 
 capabilities:
-  skills:
-    - coding-standards
-    - tdd-workflow
+  allowed:
+    skills: [coding-standards, tdd-workflow, review, security-review, verification-loop]
+    agents: [luna_worker, code-reviewer, verifier]
+  denied: [memory, session-start-recall, smart-memory-recall, agent-tuner, self-learner-write, maestro, kraken, swarm]
+  enforcement: policy_only_except_host_credential_deny
 
-worker:
-  role: implementation
-  count: 1
+workers:
+  implementation:
+    role: luna_worker
+    identity: unavailable_to_repository
+  reviewer:
+    role: code-reviewer
+    identity: unavailable_to_repository
+  verifier:
+    role: verifier
+    identity: unavailable_to_repository
+
+environment:
+  runtime:
+    go: PENDING-AT-FREEZE
+  os: darwin-arm64
+
+review:
+  required: true
+  result: pending
+  artifact: review/code-review.md
 
 verification:
-  - ./scripts/verify.sh
-  - ./scripts/wiki-lint.sh
-  - ./scripts/check-scope.sh .agents/runs/EXAMPLE-001/PLAN.md
+  independent: true
+  result: pending
+  artifact: review/verification.md
+  commands: [./scripts/verify.sh, ./scripts/agent-run.sh verify-freeze EXAMPLE-001, ./scripts/check-scope.sh EXAMPLE-001, ./scripts/wiki-lint.sh]
+
+bounded_fix:
+  maximum_attempts: 2
+  attempts_used: 0
 

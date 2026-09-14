@@ -2,13 +2,21 @@
 
 ## Acceptance criteria
 
-## Changed files and criterion mapping
+- AC-1: pass/fail with evidence
 
-## Verification evidence
+## Changed paths and criterion mappings
 
-## Review evidence
+## Freeze verification
 
-## Scope inspection
+## Code review evidence
+
+## Independent verifier evidence
+
+## Bounded fixes
+
+## Scope result
+
+## Unresolved caveats
 
 ## Stop condition
 

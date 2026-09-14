@@ -1,18 +1,45 @@
 # Architecture
 
-The repository uses engineering determinism, not byte-for-byte model determinism. Given the same repository state, task contract, evidence set, mode, skill set, and verification commands, it seeks the same externally observable behavior and acceptance result.
+## Layers
 
-## Control and capability contract
+| Layer | Owns | Does not own |
+|---|---|---|
+| CONTROL PLANE: `.agents` | permission, state machine, hashes, scope, stop gates | agent capability inventory or project facts |
+| CAPABILITY PLANE: vibecosystem | available skills, roles, hooks, workers | task scope or workflow authority |
+| KNOWLEDGE PLANE: `docs/wiki` | sourced project knowledge and history | canonical truth or active instructions |
+| OBJECTIVE REPOSITORY STATE | code, tests, build/static results | rationale for work |
 
-`.agents` owns state transitions, task boundaries, stop conditions, and proof. vibecosystem is optional and provides skills or roles only. In deterministic mode, allowlist skills, use one implementation worker, then code review and verifier; never auto-start a swarm. Learning found during a run is deferred until CODE DONE and cannot alter current rules. Maximum bounded-fix retries: two; each retry must name prior failure evidence and targeted correction.
+Engineering determinism means the same repository SHA, contract, frozen evidence, frozen plan, policy/capability set, and verification commands produce the same observable acceptance result—not identical model prose.
 
-Preferred QA flow: `IMPLEMENT → CODE REVIEW → VERIFIER → PASS` or `FAIL → BOUNDED FIX → VERIFY`. A profile exposes capabilities (`core`, `backend`, `security`); a mode limits behavior (`deterministic`, `explore`, `review`). They are separate axes: `profile = core`, `mode = deterministic`.
+## Invariants
 
-## Two transactions
+- profile != mode: profile exposes capabilities; mode limits their behavior.
+- task != execution plan: task says requested outcome; frozen plan says authorized implementation boundary.
+- wiki != canonical source: current code/tests and canonical docs outrank stale wiki interpretation.
+- memory != evidence: recalled context cannot silently join frozen evidence.
+- review != verification: reviewer evaluates code/scope; verifier reruns required gates.
+- CODE DONE != KNOWLEDGE DONE: source knowledge is written only in Transaction B.
 
-Code: `TASK → DISCOVER → WIKI READ → EVIDENCE FREEZE → PLAN FREEZE → IMPLEMENT → VERIFY → REVIEW → CODE DONE`. Wiki is read-only.
+```mermaid
+stateDiagram-v2
+  [*] --> Discover
+  Discover --> EvidenceFreeze
+  EvidenceFreeze --> PlanFreeze
+  PlanFreeze --> Implement
+  Implement --> Verify
+  Verify --> Review: pass
+  Review --> CodeDone: pass
+  Verify --> BoundedFix: fail
+  BoundedFix --> Verify
+  Implement --> DiscoverAmendment: necessary missing fact
+  DiscoverAmendment --> EvidenceFreeze
+```
 
-Knowledge: `CODE RESULT → SESSION SUMMARY → WIKI INGEST → NEW DECISIONS/LESSONS → WIKI LINT → KNOWLEDGE DONE`. A task cannot rewrite its own past; after completion it may become history used by future tasks.
+## Transactions
 
-The sample [[task-registry]] uses [[use-in-memory-storage-for-example]] and guards input as documented by [[validate-input-before-state-change]].
+Transaction A: `TASK → DISCOVER → WIKI READ → EVIDENCE FREEZE → PLAN FREEZE → IMPLEMENT → VERIFY → REVIEW → CODE DONE`. Wiki writes are forbidden.
+
+Transaction B: `CODE RESULT → FACTUAL SESSION SUMMARY → WIKI INGEST → DECISIONS/LESSONS → LOG → WIKI LINT → KNOWLEDGE DONE`.
+
+A task cannot rewrite its own past. After completion, it may become history for future tasks.
 

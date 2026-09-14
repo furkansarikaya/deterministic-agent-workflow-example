@@ -1,14 +1,15 @@
 # Verification
 
-This Go example has no external dependencies. For every implementation task run:
-
-```bash
+```sh
 ./scripts/verify.sh
-./scripts/check-scope.sh .agents/runs/<TASK-ID>/PLAN.md
-git status --short
-git diff --name-only
-git diff --stat
+./scripts/control-plane-test.sh
+./scripts/agent-policy.sh effective
+./scripts/agent-run.sh status
+./scripts/agent-run.sh validate <TASK-ID>
+./scripts/agent-run.sh verify-freeze <TASK-ID>
+./scripts/check-scope.sh <TASK-ID>
+./scripts/wiki-lint.sh
 ```
 
-`verify.sh` runs `go build ./...`, `go test ./...`, and `go vet ./...` with fail-fast behavior. A failed check enters the bounded-fix path in `WORKFLOW.md`.
+The verifier records commands and results in `review/verification.md`. Failure follows bounded fix; never weaken checks.
 

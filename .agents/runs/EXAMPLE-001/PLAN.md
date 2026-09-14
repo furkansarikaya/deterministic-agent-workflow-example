@@ -1,83 +1,49 @@
+---
+scope:
+  - path: src/task_registry.go
+    criteria: [AC-1, AC-2]
+  - path: tests/task_registry_test.go
+    criteria: [AC-1, AC-2, AC-3]
+  - path: .agents/runs/EXAMPLE-001/EVIDENCE.md
+    criteria: [AC-3]
+  - path: .agents/runs/EXAMPLE-001/RUN.yaml
+    criteria: [AC-3]
+  - path: .agents/runs/EXAMPLE-001/RESULT.md
+    criteria: [AC-3, AC-4]
+  - path: .agents/runs/EXAMPLE-001/review/code-review.md
+    criteria: [AC-3]
+  - path: .agents/runs/EXAMPLE-001/review/verification.md
+    criteria: [AC-3]
+  - path: docs/wiki/raw/sessions/2026-09-14-example-001.md
+    criteria: [AC-4]
+  - path: docs/wiki/sources/session/2026-09-14-example-001.md
+    criteria: [AC-4]
+  - path: docs/wiki/log.md
+    criteria: [AC-4]
+  - path: docs/wiki/lint-report.md
+    criteria: [AC-4]
+---
+
 # Plan: EXAMPLE-001
 
 ## Behavior
 
-Create a dependency-free in-memory registry that trims titles, rejects blanks before mutation, lists copies of state, and marks an existing task complete. Add tests and the control/knowledge scaffolding that demonstrates the deterministic workflow.
-
-## Files to modify
-
-- None; this is an initial repository.
-
-## Files to create
-
-See **Expected changed files** below.
-
-## Files to delete
-
-- None.
+Add a focused `Find(id int) (Task, error)` registry method. It scans existing tasks, returns the value on match, and reuses `ErrTaskNotFound` otherwise.
 
 ## Tests
 
-- Creation, listing, and completion lifecycle.
-- Blank title rejection without state change.
-- Missing-task completion error.
+Add success and missing-ID coverage. Existing lifecycle and input-validation tests remain unchanged.
 
 ## Verification commands
 
-```bash
+```sh
 ./scripts/verify.sh
+./scripts/agent-run.sh verify-freeze EXAMPLE-001
+./scripts/check-scope.sh EXAMPLE-001
 ./scripts/wiki-lint.sh
-./scripts/check-scope.sh .agents/runs/EXAMPLE-001/PLAN.md
 ```
 
-## Expected changed files
+## Amendment rule
 
-- .agents/ENGINEERING.md
-- .agents/EVIDENCE_TEMPLATE.md
-- .agents/GIT.md
-- .agents/KNOWLEDGE.md
-- .agents/RESULT_TEMPLATE.md
-- .agents/TASK_TEMPLATE.md
-- .agents/VERIFICATION.md
-- .agents/VIBECOSYSTEM.md
-- .agents/WORKFLOW.md
-- .agents/modes/deterministic.md
-- .agents/modes/explore.md
-- .agents/modes/review.md
-- .agents/runs/EXAMPLE-001/EVIDENCE.md
-- .agents/runs/EXAMPLE-001/PLAN.md
-- .agents/runs/EXAMPLE-001/RESULT.md
-- .agents/runs/EXAMPLE-001/RUN.yaml
-- .agents/runs/EXAMPLE-001/TASK.md
-- .gitignore
-- AGENTS.md
-- CLAUDE.md
-- README.md
-- docs/architecture.md
-- docs/wiki/CLAUDE.md
-- docs/wiki/KNOWLEDGE-PIPELINE.md
-- docs/wiki/archive/README.md
-- docs/wiki/concepts/engineering-determinism.md
-- docs/wiki/concepts/two-transaction-model.md
-- docs/wiki/decisions/use-in-memory-storage-for-example.md
-- docs/wiki/entities/task-registry.md
-- docs/wiki/index.md
-- docs/wiki/lessons/validate-input-before-state-change.md
-- docs/wiki/lint-report.md
-- docs/wiki/log.md
-- docs/wiki/raw/sessions/2026-09-14-bootstrap.md
-- docs/wiki/sources/architecture/architecture-overview.md
-- docs/wiki/sources/session/2026-09-14-bootstrap.md
-- docs/wiki/syntheses/README.md
-- go.mod
-- scripts/check-scope.sh
-- scripts/verify.sh
-- scripts/wiki-lint.sh
-- src/task_registry.go
-- tests/task_registry_test.go
-
-## Freeze
-
-Plan version: v1  
-Frozen at: IMPLEMENT for EXAMPLE-001.
+After freeze, additional paths or facts require an amendment and explicit re-freeze.
 

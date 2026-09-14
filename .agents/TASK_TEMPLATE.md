@@ -16,6 +16,9 @@
 
 ## Acceptance criteria
 
+- AC-1:
+- AC-2:
+
 ## Verification commands
 
 ## Completion response

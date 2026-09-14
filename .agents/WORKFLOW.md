@@ -1,16 +1,14 @@
 # Deterministic workflow
 
-All coding work follows this non-skippable state machine:
-
 ```text
-START → DISCOVER → EVIDENCE FREEZE → PLAN → PLAN FREEZE → IMPLEMENT → VERIFY → REVIEW → DONE
-                                                            ↓ fail
-                                                BOUNDED FIX → VERIFY
+START → DISCOVER → EVIDENCE FREEZE → PLAN → PLAN FREEZE → IMPLEMENT → VERIFY → REVIEW → CODE DONE
+                                                                  ↓ fail
+                                                      CAPTURE EVIDENCE → BOUNDED FIX → VERIFY
 ```
 
-DISCOVER is read-only: inspect the smallest useful set of repository files, tests, architecture, task-relevant wiki pages, permitted skills, and useful Git history. Do not edit code/tests/wiki, install dependencies, or broadly refactor. Before plan or implementation, create `.agents/runs/<TASK-ID>/EVIDENCE.md` referencing repository and wiki evidence. It freezes once IMPLEMENT starts.
+DISCOVER is read-only: inspect the smallest sufficient repository, test, architecture, Git, capability, and task-relevant wiki evidence. Never edit application/tests/wiki, install dependencies, or broadly refactor in DISCOVER.
 
-PLAN must list files to modify/create/delete, behavior, tests, and verification. At PLAN FREEZE that file list is the task boundary. Each changed file maps to an acceptance criterion. New required information triggers `IMPLEMENT → DISCOVER AMENDMENT → EVIDENCE v2 → PLAN v2 → IMPLEMENT`; do not browse unrelated wiki pages.
+Before IMPLEMENT, `TASK.md`, `EVIDENCE.md`, `PLAN.md`, and effective mode policy must be hashed in `RUN.yaml`; `agent-run.sh verify-freeze` must pass. The plan’s YAML `scope` is the complete path boundary and every path maps to acceptance IDs. A changed path outside it blocks DONE.
 
-VERIFY failures attributable to implementation may use at most two bounded fixes. Feed exact failure evidence into each fix; no blind retry. REVIEW is code review plus independent verifier. Before DONE run `git status --short`, `git diff --name-only`, and `git diff --stat`; unexplained files block DONE. Once acceptance criteria pass, stop—no cleanup, neighboring refactors, or speculative abstractions.
+Missing information follows: `IMPLEMENT → DISCOVER AMENDMENT → amendments/<sequence>-<reason>.md → new evidence/plan version → explicit re-freeze → IMPLEMENT`. Do not mutate frozen history silently. Default bounded fixes: two. Capture the failed command/evidence, target a correction, rerun the failed check, then rerun required verification. Review and verification are separate artifacts. CODE DONE is not KNOWLEDGE DONE; wiki writes happen only in Transaction B.
 

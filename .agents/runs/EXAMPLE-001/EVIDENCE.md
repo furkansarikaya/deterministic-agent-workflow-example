@@ -2,47 +2,33 @@
 
 ## Repository
 
-Commit: `unborn repository; no commit ID exists`
+Baseline SHA: `PENDING-V2-BASELINE`
 
-Relevant files:
+Inspected paths:
 
 - `src/task_registry.go`
 - `tests/task_registry_test.go`
 - `docs/architecture.md`
+- `.agents/WORKFLOW.md`
+- `.agents/modes/deterministic.yaml`
 
-## Wiki
+## Wiki references
 
-### Entities
-
-- [[task-registry]]
-
-### Decisions
-
-- [[use-in-memory-storage-for-example]]
-
-### Lessons
-
-- [[validate-input-before-state-change]]
-
-### Concepts
-
-- [[engineering-determinism]]
-- [[two-transaction-model]]
-
-### Sources
-
-- [[architecture-overview]]
-- [[2026-09-14-bootstrap]]
+- Entity: [[task-registry]]
+- Decision: [[use-in-memory-storage-for-example]]
+- Lesson: [[validate-input-before-state-change]]
+- Concepts: [[engineering-determinism]], [[two-transaction-model]]
+- Source: [[architecture-overview]]
 
 ## Derived constraints
 
-- Do not introduce a database or dependencies.
-- Validate before mutating registry state.
-- Keep wiki read-only throughout the code transaction.
-- Use the smallest in-memory implementation and Go standard library.
+- Preserve in-memory storage and error conventions.
+- Return a value, not an internal slice/pointer.
+- Add only focused lookup tests.
+- Wiki remains read-only until CODE DONE.
 
-## Freeze
+## Freeze metadata
 
-Evidence version: v1  
-Frozen at: PLAN FREEZE for EXAMPLE-001.
+Version: v1  
+Frozen only after actual baseline SHA replaces the pending marker and `agent-run.sh freeze EXAMPLE-001` records hashes.
 

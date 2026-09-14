@@ -1,6 +1,8 @@
-# Vibecosystem integration contract
+# Vibecosystem adapter contract
 
-vibecosystem is a capability provider, not this repository's workflow owner. It may supply explicitly allowlisted skills (for EXAMPLE-001: `coding-standards` and `tdd-workflow`) and bounded roles.
+Inspected local vibecosystem v3.4.0 at `/Users/furkansarikaya/claude/vibecosystem`. Its `core` profile contains actual `code-reviewer` and `verifier` roles plus `coding-standards`, `tdd-workflow`, `review`, `security-review`, and `verification-loop`. The Codex adapter supplies `luna_worker` with fixed model authority.
 
-In deterministic mode, prefer one implementation worker followed by a code reviewer and verifier. Do not auto-invoke a large swarm, let self-learning rewrite active rules, or let a capability exceed the frozen task/evidence/plan contract. New learning is recorded only after CODE DONE in the knowledge transaction. Review feedback must be concrete and drives at most two bounded fixes; blind retries are prohibited.
+Profile means capabilities; mode means permitted behavior. This example allows the listed skills and `luna_worker`/reviewer/verifier phases. It denies memory, `session-start-recall`, `smart-memory-recall`, `agent-tuner`, `self-learner` writes, `maestro`, `kraken`, and automatic swarm/context injection.
+
+Host hooks are globally controlled, so these denials are policy-only here. Actual core `credential-deny` is platform-enforced only if installed/active. Claude-only model metadata is never reused for Codex.
 

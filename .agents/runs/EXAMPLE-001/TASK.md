@@ -2,49 +2,37 @@
 
 ## Objective
 
-Bootstrap the workflow example and add the sample registry capability to mark an existing task complete.
+Add read-only lookup of one task by ID to the existing in-memory task registry.
 
 ## Context
 
-This is the initial repository state. The application exists only to exercise the control architecture.
+This is the first genuine deterministic task after the V2 control-plane baseline. It must use the real baseline SHA recorded in evidence before freeze.
 
 ## Allowed scope
 
-Create the listed bootstrap control-plane, wiki, Go registry, tests, and scripts files.
+Only the frozen paths in PLAN.md: registry implementation/test, run evidence/fingerprint/review/result artifacts, and post-CODE-DONE factual wiki records.
 
 ## Forbidden scope
 
-No dependencies, database, HTTP framework, network service, uncontrolled swarm, or wiki writes during the code transaction.
+No dependencies, persistence, API, refactor, database, wiki write during Transaction A, swarm, memory, or automatic learning.
 
 ## Required behavior
 
-Create/list/complete in-memory tasks; reject blank titles before state changes; report a missing task.
-
-## Constraints
-
-Use profile `core`, mode `deterministic`, and allowlisted skills `coding-standards` and `tdd-workflow`. One implementation worker only.
-
-## Existing pattern references
-
-[[task-registry]], [[use-in-memory-storage-for-example]], and [[validate-input-before-state-change]].
+Return an existing task by ID without exposing mutable state; return `ErrTaskNotFound` for a missing ID.
 
 ## Acceptance criteria
 
-1. The required control-plane and wiki structure exists.
-2. The Go registry creates, lists, completes, and validates tasks.
-3. Automated tests cover success and error paths.
-4. Verification, wiki lint, and scope checks succeed.
-5. The run has frozen evidence, plan, fingerprint, and result artifacts.
+- AC-1: `Find(id)` returns the matching task without changing registry state.
+- AC-2: `Find(id)` returns `ErrTaskNotFound` when absent.
+- AC-3: Focused regression tests, Go verification, freeze, scope, review, and independent verifier pass.
+- AC-4: Factual post-CODE-DONE knowledge records are linked and lint-clean.
 
 ## Verification commands
 
-```bash
+```sh
 ./scripts/verify.sh
+./scripts/agent-run.sh verify-freeze EXAMPLE-001
+./scripts/check-scope.sh EXAMPLE-001
 ./scripts/wiki-lint.sh
-./scripts/check-scope.sh .agents/runs/EXAMPLE-001/PLAN.md
 ```
-
-## Completion response
-
-Report created structure, application behavior, workflow, wiki transactions, exact verification, and genuine caveats.
 

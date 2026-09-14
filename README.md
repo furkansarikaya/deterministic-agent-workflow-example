@@ -1,39 +1,75 @@
-# Deterministic AI Coding-Agent Workflow Example
+# Deterministic Agent Workflow Golden Reference
 
-This repository is a working reference for a shared Codex and Claude Code control architecture, not a business application. It separates permission and process from knowledge and objectively executable code.
+This repository demonstrates engineering determinism for Codex and Claude Code. It does not promise identical model text; it makes the task contract, evidence, plan, policy, scope, and acceptance gates inspectable and reproducible.
 
 ```mermaid
-flowchart TB
-  A[.agents control plane<br/>what an agent may do] --> B[Deterministic task run]
-  C[vibecosystem capabilities<br/>how bounded work is executed] --> B
-  D[docs/wiki knowledge plane<br/>what the project knows] --> E[Evidence freeze]
-  E --> B --> F[src + tests<br/>what is objectively true]
-  F --> G[CODE DONE] --> H[Knowledge transaction]
-  H --> D
+flowchart TD
+  U[User task] --> T[Task contract]
+  T --> C[.agents control plane]
+  V[vibecosystem capability plane] --> R[Bounded agent run]
+  W[Git-backed wiki] --> E[Frozen evidence]
+  C --> E --> P[Frozen plan] --> R
+  R --> O[Repository + tests: objective truth]
+  O --> D[CODE DONE] --> K[Knowledge transaction]
+  K --> W
 ```
 
-## Four layers
+## Start a task
 
-- `.agents` answers **what an agent is allowed to do**: state gates, scope, and proof.
-- vibecosystem is an optional capability provider answering **how work is executed**.
-- `docs/wiki` answers **what this project already knows**, using Git-backed Markdown and wikilinks.
-- `src` and `tests` answer **what is objectively true now**.
+### Codex
 
-Codex begins with [AGENTS.md](AGENTS.md); Claude Code begins with [CLAUDE.md](CLAUDE.md). Both route to the same detailed rules, so behavior is consistent without duplicating instructions. Obsidian can visualize the wiki but is optional: all links are plain Markdown and `scripts/wiki-lint.sh` works without it.
+Read `AGENTS.md`, then run:
 
-## Modes and capabilities
+```sh
+./scripts/agent-policy.sh effective
+./scripts/agent-run.sh status
+```
 
-`deterministic` is for bounded implementation: frozen evidence and plan, allowlisted skills, one implementation worker by default, and mandatory verification. `explore` permits broad research but cannot edit application code; `review` is read-heavy and requires an explicit fix task before writes. A **profile** (such as `core` or `backend`) says which capabilities exist; a **mode** says how those capabilities may behave. See `.agents/modes/` and `docs/architecture.md`.
+Read the resolved run’s TASK/EVIDENCE/PLAN. DISCOVER is read-only. IMPLEMENT requires:
 
-## Exercise EXAMPLE-001
+```sh
+./scripts/agent-run.sh verify-freeze <TASK-ID>
+./scripts/check-scope.sh --validate-plan <TASK-ID>
+```
 
-The completed example run is under `.agents/runs/EXAMPLE-001/`. To inspect its contract and re-run its checks:
+### Claude Code
 
-```bash
+Read `CLAUDE.md` and follow the same commands and gates. Claude conveniences, hooks, memory, persistent planning, and subagents are subordinate to the shared policy; `.agents/runs/<TASK>/PLAN.md` outranks mutable `thoughts/` files.
+
+## Selection, freeze, and enforcement
+
+`.agents/ACTIVE_RUN` contains exactly one task ID. A missing, malformed, or unresolved value blocks implementation. `.agents/modes/*.yaml` is the machine policy; Markdown explains it. Freeze hashes cover TASK, EVIDENCE, PLAN, and mode policy:
+
+```sh
+./scripts/agent-run.sh freeze EXAMPLE-001
+./scripts/agent-run.sh verify-freeze EXAMPLE-001
+./scripts/agent-run.sh validate EXAMPLE-001
+./scripts/check-scope.sh EXAMPLE-001
+```
+
+An amendment is explicit under `amendments/`; it records why evidence/plan changed, then `refreeze` requires that artifact. The frozen plan frontmatter maps every authorized path to acceptance IDs.
+
+## Capability and knowledge planes
+
+vibecosystem provides actual bounded capabilities, not workflow authority. This example uses its inspected v3.4.0 `core` profile and documents `luna_worker`, `code-reviewer`, `verifier`, and allowed skills in `.agents/VIBECOSYSTEM.md`. Profile means available capabilities; mode means permitted behavior.
+
+The LLM Wiki is plain Markdown with Obsidian-style wikilinks; Obsidian only adds navigation. Transaction A reads a bounded wiki traversal and freezes references into evidence. Transaction B begins only after CODE DONE and writes factual sessions, decisions/lessons, log entries, then runs lint.
+
+## What is actually enforced?
+
+See [the enforcement matrix](.agents/ENFORCEMENT.md). Hashes, active task, scope mappings, required artifacts, checks, and wiki structure are script-enforced. Globally installed memory/recall/prompt-improvement/swarm hooks are policy-only from this repository’s perspective unless the host disables them.
+
+## Run the demonstration
+
+```sh
 ./scripts/verify.sh
+./scripts/control-plane-test.sh
+./scripts/agent-policy.sh effective
+./scripts/agent-run.sh validate EXAMPLE-001
+./scripts/agent-run.sh verify-freeze EXAMPLE-001
+./scripts/check-scope.sh EXAMPLE-001
 ./scripts/wiki-lint.sh
-./scripts/check-scope.sh .agents/runs/EXAMPLE-001/PLAN.md
 ```
 
-For a new task, copy `TASK_TEMPLATE.md`, do read-only DISCOVER, create and freeze `EVIDENCE.md`, create and freeze `PLAN.md`, implement only planned files, then verify/review. After CODE DONE, write a factual raw session summary, ingest any new decision or lesson, append `docs/wiki/log.md`, and lint the wiki. A task cannot rewrite its own past: after completion it may become history for future tasks.
+To create EXAMPLE-002: copy templates, make it the sole ACTIVE_RUN, complete read-only DISCOVER, freeze its contract, implement only mapped scope, record independent review/verifier evidence, then write knowledge only after CODE DONE.
 

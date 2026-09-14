@@ -2,26 +2,22 @@
 
 ## Repository
 
-Commit: `<sha or unborn repository>`
+Baseline SHA: `<real git SHA>`
 
-Relevant files:
+Inspected paths:
 
-## Wiki
+## Wiki references
 
-### Entities
-
-### Decisions
-
-### Lessons
-
-### Concepts
-
-### Sources
+- Entities:
+- Decisions:
+- Lessons:
+- Concepts:
+- Sources:
 
 ## Derived constraints
 
-## Freeze
+## Freeze metadata
 
-Evidence version: v1
-Frozen at: <timestamp or task transition>
+Version: v1  
+Frozen only after `agent-run.sh freeze <TASK-ID>`. Do not copy full wiki pages.
 

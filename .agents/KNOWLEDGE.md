@@ -1,14 +1,10 @@
-# Knowledge precedence
+# Knowledge precedence and deterministic read contract
 
-Resolve conflicts in this order:
+Resolve conflicts: (1) explicit task, (2) current behavior/tests, (3) canonical docs, (4) wiki decisions, (5) lessons/history, (6) skill guidance, (7) model preference.
 
-1. Explicit task requirements
-2. Current repository behavior and tests
-3. Canonical architecture/docs
-4. Current wiki decisions
-5. Wiki lessons/history
-6. Capability/skill guidance
-7. General model preference
+Examples: task forbidding dependencies beats a skill recommending a library; current tests beat a stale lesson; canonical file storage beats a wiki database suggestion.
 
-Higher-priority evidence wins. In deterministic code work, traverse only task-relevant wiki pages: `index → entities → decisions → lessons → concepts → sources`. Wiki is read-only until CODE DONE; knowledge write-back is a separate transaction.
+Traverse only `index → relevant entities → decisions → lessons → concepts → sources`. Freeze references and derived constraints in evidence; do not copy pages. After freeze, unrelated retrieval is prohibited; missing information triggers amendment.
+
+Transaction A is code through CODE DONE, wiki read-only. Transaction B is factual session summary → ingestion → decision/lesson → log → lint → KNOWLEDGE DONE. A task cannot rewrite its own past.
 

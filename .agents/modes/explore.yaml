@@ -1,0 +1,16 @@
+mode: explore
+task:
+  required: false
+wiki:
+  read: true
+  write_during_code_transaction: false
+memory:
+  read: true
+  write: false
+orchestration:
+  swarm: explicit_only
+review:
+  required: false
+verification:
+  required: false
+
