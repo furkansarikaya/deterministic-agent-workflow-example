@@ -6,7 +6,7 @@ Add read-only lookup of one task by ID to the existing in-memory task registry.
 
 ## Context
 
-This is the first genuine deterministic task after the V2 control-plane baseline. It must use the real baseline SHA recorded in evidence before freeze.
+This is a genuine deterministic task against a real control-plane baseline. It must use the real baseline SHA recorded in evidence before freeze.
 
 ## Allowed scope
 
@@ -31,8 +31,7 @@ Return an existing task by ID without exposing mutable state; return `ErrTaskNot
 
 ```sh
 ./scripts/verify.sh
-./scripts/agent-run.sh verify-freeze EXAMPLE-001
-./scripts/check-scope.sh EXAMPLE-001
+./scripts/agent.sh verify-freeze EXAMPLE-001
+./scripts/agent.sh verify-scope EXAMPLE-001
 ./scripts/wiki-lint.sh
 ```
-

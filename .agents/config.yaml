@@ -1,4 +1,3 @@
-version: 2
 default_mode: deterministic
 default_profile: core
 active_run_file: .agents/ACTIVE_RUN
@@ -7,4 +6,3 @@ safety:
   destructive_git_requires_explicit_authorization: true
   external_network_requires_task_authorization: true
   dependency_changes_require_task_authorization: true
-

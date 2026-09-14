@@ -13,7 +13,7 @@ All paths are in frozen PLAN.md frontmatter. Implementation: `src/task_registry.
 
 ## Freeze verification
 
-`agent-run.sh verify-freeze EXAMPLE-001`: PASS.
+`agent.sh verify-freeze EXAMPLE-001`: PASS.
 
 ## Code review evidence
 
@@ -29,7 +29,7 @@ All paths are in frozen PLAN.md frontmatter. Implementation: `src/task_registry.
 
 ## Scope result
 
-`check-scope.sh EXAMPLE-001`: PASS.
+`agent.sh verify-scope EXAMPLE-001`: PASS.
 
 ## Unresolved caveats
 
@@ -38,4 +38,3 @@ The repository scripts cannot technically deactivate globally installed host hoo
 ## Stop condition
 
 CODE DONE reached. Knowledge transaction follows separately.
-

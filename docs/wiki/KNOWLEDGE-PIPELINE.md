@@ -1,16 +1,16 @@
 # Knowledge pipeline
 
-## Read path during deterministic code work
+## Transaction A — code
 
-Follow the smallest relevant traversal: [[index]] → entity → decision → lesson → concept → source. Freeze references in the task evidence and do not dynamically browse unrelated pages.
+Use the smallest task-relevant traversal: [[index]] → entity → decision → lesson → concept → source. Freeze references and derived constraints in EVIDENCE. `/wiki-query`-style retrieval is read-only here: no filed-back synthesis, log entry, index mutation, or knowledge-page update. Missing essential knowledge requires an amendment and re-freeze.
 
-## Write path after CODE DONE
+## Transaction B — knowledge
 
-1. Create a short factual entry in `raw/sessions/`.
-2. Ingest warranted source, decision, or lesson pages.
-3. Append the operation to [[log]].
-4. Run `./scripts/wiki-lint.sh`.
-5. Record contradictions explicitly and archive obsolete pages rather than deleting them.
+After CODE DONE:
 
-A task cannot rewrite its own past. After completion, it may become part of the history used by future tasks. This is the knowledge half of [[two-transaction-model]].
+1. Use `/wiki-ingest` for warranted sourced knowledge, following its normal review/approval flow.
+2. Update only relevant graph pages and the wiki operation log.
+3. Run `/wiki-lint`, resolve findings, then mark KNOWLEDGE DONE.
+
+A task cannot rewrite its own past. After completion, it may become history for future tasks.
 

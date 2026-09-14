@@ -38,12 +38,11 @@ Add success and missing-ID coverage. Existing lifecycle and input-validation tes
 
 ```sh
 ./scripts/verify.sh
-./scripts/agent-run.sh verify-freeze EXAMPLE-001
-./scripts/check-scope.sh EXAMPLE-001
+./scripts/agent.sh verify-freeze EXAMPLE-001
+./scripts/agent.sh verify-scope EXAMPLE-001
 ./scripts/wiki-lint.sh
 ```
 
 ## Amendment rule
 
 After freeze, additional paths or facts require an amendment and explicit re-freeze.
-

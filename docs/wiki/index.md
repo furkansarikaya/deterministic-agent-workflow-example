@@ -1,6 +1,6 @@
 # Wiki index
 
-This is the entry point for task-relevant navigation.
+Task-relevant navigation starts here.
 
 ## Entities
 
@@ -22,7 +22,7 @@ This is the entry point for task-relevant navigation.
 ## Sources
 
 - [[architecture-overview]]
-- [[2026-09-14-bootstrap]]
+- [[2026-09-14-example-001]]
 
-See [[KNOWLEDGE-PIPELINE]] for read/write sequencing and [[log]] for append-only operations.
+See [[KNOWLEDGE-PIPELINE]] for transaction boundaries and [[log]] for actual wiki operations.
 

@@ -2,16 +2,18 @@
 
 This Git-backed Markdown wiki is a knowledge graph; Obsidian is optional visualization only. Current repository state and canonical documentation outrank it.
 
-1. Every important claim has a source.
-2. Contradictions are never silently deleted; mark them explicitly.
+1. Important claims have sources.
+2. Contradictions are explicit, never silently deleted.
 3. Use meaningful bidirectional relationships.
-4. Log every wiki operation in [[log]].
-5. Archive outdated pages; do not delete them.
+4. Log actual INGEST or filed-back QUERY operations in [[log]].
+5. Archive outdated pages instead of deleting them.
 6. One concept or decision generally maps to one page.
-7. Current repository state outranks stale wiki interpretation.
-8. Wiki knowledge never overrides explicit task requirements.
-9. Canonical project documentation remains canonical.
-10. Every source field must resolve to an existing repository path; task references must resolve to real runs.
-11. Contradicted pages use `status: contradicted` and `contradicts:` metadata; archive rather than erase history.
+7. Explicit task requirements outrank wiki knowledge.
+8. Source paths and task references resolve to repository files/runs.
+9. Contradicted pages use `status: contradicted` and `contradicts:` metadata.
 
-During deterministic code execution, wiki access is read-only and limited to task-relevant traversal: [[index]] → entities → decisions → lessons → concepts → sources. Do not write syntheses, logs, or pages during this transaction. After CODE DONE, use the separate knowledge transaction described in [[KNOWLEDGE-PIPELINE]]; raw session summaries are factual and immutable once ingested. `wiki-lint.sh` reports findings and never silently rewrites knowledge.
+## Deterministic adaptation
+
+During Transaction A, `/wiki-query`-style retrieval is read-only: follow [[index]] → entity → decision → lesson → concept → source, freeze selected references in EVIDENCE, and do not file back synthesis or update log/index/entities/concepts/decisions/lessons.
+
+After CODE DONE, Transaction B may use the user's `/wiki-ingest` and `/wiki-lint` operations. Ingest keeps its normal review/approval semantics; lint reports findings rather than silently fixing them. The repository's `scripts/wiki-lint.sh` is a compact structural example, not a replacement for the global skill.

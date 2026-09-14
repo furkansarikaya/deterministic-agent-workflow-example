@@ -1,75 +1,64 @@
-# Deterministic Agent Workflow Golden Reference
+# Deterministic Agent Workflow Example
 
-This repository demonstrates engineering determinism for Codex and Claude Code. It does not promise identical model text; it makes the task contract, evidence, plan, policy, scope, and acceptance gates inspectable and reproducible.
+A small, Git-backed reference for deterministic coding-agent control shared by Codex and Claude Code. It aims for engineering determinism: the same repository state, task, frozen evidence, frozen plan, policy, and checks should lead to the same observable acceptance result.
 
 ```mermaid
-flowchart TD
-  U[User task] --> T[Task contract]
-  T --> C[.agents control plane]
-  V[vibecosystem capability plane] --> R[Bounded agent run]
-  W[Git-backed wiki] --> E[Frozen evidence]
-  C --> E --> P[Frozen plan] --> R
-  R --> O[Repository + tests: objective truth]
-  O --> D[CODE DONE] --> K[Knowledge transaction]
+flowchart LR
+  T[Task contract] --> C[.agents control plane]
+  V[vibecosystem capabilities] --> R[Bounded run]
+  W[LLM Wiki] --> E[Frozen evidence]
+  C --> E --> R
+  R --> O[Code + tests]
+  O --> D[CODE DONE]
+  D --> K[Knowledge transaction]
   K --> W
 ```
 
-## Start a task
+## Start a normal application task
 
-### Codex
-
-Read `AGENTS.md`, then run:
+Codex starts at [AGENTS.md](AGENTS.md); Claude Code starts at [CLAUDE.md](CLAUDE.md). Both resolve the same active run:
 
 ```sh
-./scripts/agent-policy.sh effective
-./scripts/agent-run.sh status
+./scripts/agent.sh effective
+./scripts/agent.sh status
 ```
 
-Read the resolved run’s TASK/EVIDENCE/PLAN. DISCOVER is read-only. IMPLEMENT requires:
+Read its TASK, EVIDENCE, PLAN, then DISCOVER read-only. IMPLEMENT requires a valid freeze and plan mapping:
 
 ```sh
-./scripts/agent-run.sh verify-freeze <TASK-ID>
-./scripts/check-scope.sh --validate-plan <TASK-ID>
+./scripts/agent.sh freeze <TASK-ID>
+./scripts/agent.sh verify-freeze <TASK-ID>
+./scripts/agent.sh verify-scope <TASK-ID>
 ```
 
-### Claude Code
+`.agents/ACTIVE_RUN` must name exactly one existing run. The YAML policy in `.agents/modes/` is machine-readable; the shared Markdown files explain the rules. Templates for the next run live in `.agents/templates/`.
 
-Read `CLAUDE.md` and follow the same commands and gates. Claude conveniences, hooks, memory, persistent planning, and subagents are subordinate to the shared policy; `.agents/runs/<TASK>/PLAN.md` outranks mutable `thoughts/` files.
+## Capability and knowledge boundaries
 
-## Selection, freeze, and enforcement
+vibecosystem is a capability provider, not the workflow owner. This reference adapts inspected `core` capabilities, including `luna_worker`, `code-reviewer`, and `verifier`; profile means what exists, while mode means what may run.
 
-`.agents/ACTIVE_RUN` contains exactly one task ID. A missing, malformed, or unresolved value blocks implementation. `.agents/modes/*.yaml` is the machine policy; Markdown explains it. Freeze hashes cover TASK, EVIDENCE, PLAN, and mode policy:
+The LLM Wiki is plain Markdown with Obsidian-style wikilinks. Obsidian is optional. In Transaction A, use `/wiki-query`-style retrieval read-only and freeze selected references into EVIDENCE: no filed-back synthesis, log, index, entity, concept, decision, or lesson writes. If knowledge is missing, amend and re-freeze.
 
-```sh
-./scripts/agent-run.sh freeze EXAMPLE-001
-./scripts/agent-run.sh verify-freeze EXAMPLE-001
-./scripts/agent-run.sh validate EXAMPLE-001
-./scripts/check-scope.sh EXAMPLE-001
-```
+In Transaction B, after CODE DONE, use the user’s existing `/wiki-ingest` and `/wiki-lint` workflow to update sourced project knowledge, log actual wiki operations, and resolve lint findings. The local `wiki-lint.sh` is only a small CI-friendly structural example; it does not replace `/wiki-lint`.
 
-An amendment is explicit under `amendments/`; it records why evidence/plan changed, then `refreeze` requires that artifact. The frozen plan frontmatter maps every authorized path to acceptance IDs.
+See [.agents/ENFORCEMENT.md](.agents/ENFORCEMENT.md) for script-enforced, workflow-enforced, platform-enforced, and policy-only boundaries.
 
-## Capability and knowledge planes
-
-vibecosystem provides actual bounded capabilities, not workflow authority. This example uses its inspected v3.4.0 `core` profile and documents `luna_worker`, `code-reviewer`, `verifier`, and allowed skills in `.agents/VIBECOSYSTEM.md`. Profile means available capabilities; mode means permitted behavior.
-
-The LLM Wiki is plain Markdown with Obsidian-style wikilinks; Obsidian only adds navigation. Transaction A reads a bounded wiki traversal and freezes references into evidence. Transaction B begins only after CODE DONE and writes factual sessions, decisions/lessons, log entries, then runs lint.
-
-## What is actually enforced?
-
-See [the enforcement matrix](.agents/ENFORCEMENT.md). Hashes, active task, scope mappings, required artifacts, checks, and wiki structure are script-enforced. Globally installed memory/recall/prompt-improvement/swarm hooks are policy-only from this repository’s perspective unless the host disables them.
-
-## Run the demonstration
+## Run the included example
 
 ```sh
 ./scripts/verify.sh
-./scripts/control-plane-test.sh
-./scripts/agent-policy.sh effective
-./scripts/agent-run.sh validate EXAMPLE-001
-./scripts/agent-run.sh verify-freeze EXAMPLE-001
-./scripts/check-scope.sh EXAMPLE-001
+./scripts/agent.sh test
+./scripts/agent.sh effective
+./scripts/agent.sh status
+./scripts/agent.sh validate EXAMPLE-001
+./scripts/agent.sh verify-freeze EXAMPLE-001
+./scripts/agent.sh verify-scope EXAMPLE-001
 ./scripts/wiki-lint.sh
 ```
 
-To create EXAMPLE-002: copy templates, make it the sole ACTIVE_RUN, complete read-only DISCOVER, freeze its contract, implement only mapped scope, record independent review/verifier evidence, then write knowledge only after CODE DONE.
+EXAMPLE-001 is a small task-registry lookup feature with frozen evidence, plan scope, review, verifier, and result artifacts.
+
+## Maintaining this template
+
+Normal application tasks use the workflow. Explicit user-requested maintenance of this control-plane/example repository may update the template directly without creating another demonstration run. Git history records those template changes; `.agents/runs/` stays focused on meaningful examples.
 

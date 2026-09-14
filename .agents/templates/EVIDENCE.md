@@ -18,6 +18,5 @@ Inspected paths:
 
 ## Freeze metadata
 
-Version: v1  
-Frozen only after `agent-run.sh freeze <TASK-ID>`. Do not copy full wiki pages.
-
+Evidence revision: 1  
+Freeze with `./scripts/agent.sh freeze <TASK-ID>`. Do not copy full wiki pages.

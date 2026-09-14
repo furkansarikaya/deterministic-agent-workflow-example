@@ -1,7 +1,5 @@
 # Knowledge log
 
-Append-only record. Do not rewrite past entries.
+Append-only record of actual wiki operations, not ordinary repository edits.
 
-- 2026-09-14 — BOOTSTRAP-000 created the initial repository at commit `7c9eabd`; it was not a deterministic EXAMPLE-001 run. Source: [[2026-09-14-bootstrap]].
-- 2026-09-14 — V2 policy upgrade added machine policy, active-run resolution, freeze/scope tooling, and a truthful successor EXAMPLE-001 plan. Source: [[architecture-overview]].
-- 2026-09-14 — EXAMPLE-001 CODE DONE: task lookup feature, separate review/verifier records, and factual source ingested. Source: [[2026-09-14-example-001]].
+- 2026-09-14 — EXAMPLE-001 session summary ingested and linked to [[task-registry]] and [[use-in-memory-storage-for-example]]. Source: [[2026-09-14-example-001]].

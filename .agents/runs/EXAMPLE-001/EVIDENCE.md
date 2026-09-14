@@ -29,5 +29,5 @@ Inspected paths:
 
 ## Freeze metadata
 
-Version: v1  
-Baseline established before this task's implementation. `agent-run.sh freeze EXAMPLE-001` records hashes before IMPLEMENT.
+Evidence revision: 1
+Baseline established before this task's implementation. `agent.sh freeze EXAMPLE-001` records hashes before IMPLEMENT.

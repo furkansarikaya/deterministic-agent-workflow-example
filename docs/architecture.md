@@ -21,18 +21,10 @@ Engineering determinism means the same repository SHA, contract, frozen evidence
 - CODE DONE != KNOWLEDGE DONE: source knowledge is written only in Transaction B.
 
 ```mermaid
-stateDiagram-v2
-  [*] --> Discover
-  Discover --> EvidenceFreeze
-  EvidenceFreeze --> PlanFreeze
-  PlanFreeze --> Implement
-  Implement --> Verify
-  Verify --> Review: pass
-  Review --> CodeDone: pass
-  Verify --> BoundedFix: fail
-  BoundedFix --> Verify
-  Implement --> DiscoverAmendment: necessary missing fact
-  DiscoverAmendment --> EvidenceFreeze
+flowchart LR
+  Discover --> EvidenceFreeze --> PlanFreeze --> Implement --> Verify --> Review --> CodeDone
+  Verify -->|fail| BoundedFix --> Verify
+  Implement -->|missing fact| DiscoverAmendment --> EvidenceFreeze
 ```
 
 ## Transactions
@@ -42,4 +34,3 @@ Transaction A: `TASK → DISCOVER → WIKI READ → EVIDENCE FREEZE → PLAN FRE
 Transaction B: `CODE RESULT → FACTUAL SESSION SUMMARY → WIKI INGEST → DECISIONS/LESSONS → LOG → WIKI LINT → KNOWLEDGE DONE`.
 
 A task cannot rewrite its own past. After completion, it may become history for future tasks.
-
