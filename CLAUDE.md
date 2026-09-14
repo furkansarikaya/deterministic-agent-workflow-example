@@ -10,6 +10,7 @@ Claude features are subordinate to that protocol:
 - Persistent planning: vibecosystem `thoughts/PLAN.md`, `PROGRESS.md`, and `CONTEXT.md`, if present, are mutable/non-authoritative; the frozen run plan wins.
 - Review/verifier: record distinct required artifacts and patch fingerprints; implementation never self-certifies. A changed task-owned patch makes downstream review/verification stale.
 - Delivery: CODE DONE does not authorize commits, pushes, PRs, or task-system writes. `agent.sh delivery-check` is local-only; provider mutations require explicit authorization.
+- Delegation: Claude may explicitly dispatch Codex with `AGENT_ROLE=implementation_worker`. Claude retains DISCOVER, evidence, plan, freeze, verification, review, bounded-fix decisions, and CODE DONE; Codex returns after implementation.
 - Post-CODE-DONE: factual session summary, wiki ingest/log/lint may run as Transaction B.
 
 The repository cannot technically disable globally installed Claude hooks. Deterministic denials are policy-only unless the host enforces them; see `.agents/ENFORCEMENT.md`.

@@ -104,6 +104,15 @@ docs/project/tasks/<TASK-ID>.md
 15. Gerekliyse wiki ingest/lint.
 16. KNOWLEDGE DONE.
 
+## Execution role adoption
+
+- [ ] Varsayılan `full_lifecycle` execution tanımlı.
+- [ ] Claude standalone `full_lifecycle` kullanabiliyor.
+- [ ] Codex standalone `full_lifecycle` kullanabiliyor.
+- [ ] Açık `implementation_worker` invocation tanımlı.
+- [ ] Worker later lifecycle phase'lerini, delivery'yi ve delegation'ı sahiplenmiyor.
+- [ ] Cross-agent resume ile delegated implementation farklı kavramlar olarak dokümante edildi.
+
 ## Anti-pattern'ler
 
 Yapma:

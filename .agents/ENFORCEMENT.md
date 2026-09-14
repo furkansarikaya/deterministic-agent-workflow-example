@@ -4,6 +4,8 @@
 |---|---|---|
 | Active task selection | Script-enforced | An empty checked-in `ACTIVE_RUN` reports `active_task=none`; malformed/missing targets fail and implementation commands require an explicit valid task. |
 | Valid mode / effective policy | Script-enforced | `agent.sh effective` reads YAML only from the allowlisted mode directory. |
+| Invocation role boundary | Script-enforced for CLI lifecycle commands | Default `full_lifecycle` is agent-neutral; explicit `implementation_worker` blocks baseline/freeze/refreeze, later handoff phases, and delivery. |
+| Recursive delegation in a worker | Policy-only | The repository has no generic agent-spawn interceptor; worker instructions and vibecosystem policy prohibit delegation. |
 | Task, evidence, plan, policy freeze | Script-enforced | SHA-256 values in `RUN.yaml`; `agent.sh verify-freeze` rejects mismatch. |
 | Planning freshness | Script-enforced for local Markdown/none sources | `agent.sh freshness` validates base SHA and frozen local task revision; unsupported external adapters block rather than invent state. |
 | Handoff patch integrity | Script-enforced | `agent.sh verify-handoff` invalidates VERIFIED/REVIEWED/CODE_DONE evidence when the task-owned patch fingerprint changes. |

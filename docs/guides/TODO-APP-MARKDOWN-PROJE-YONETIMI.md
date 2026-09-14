@@ -133,9 +133,10 @@ docs/project/tasks/TODO-001.md
 
 Bu önemli.
 
-Sprint/task dosyası daha sonra değişebilir.
-
-Frozen deterministic TASK bundan etkilenmemelidir.
+Sprint/task dosyası daha sonra değişebilir; frozen deterministic TASK
+otomatik değişmez. Ancak run `local_markdown` task source kullanıyorsa
+canonical source değişikliği freshness gate'ini bloklar ve amendment /
+refreeze gerektirir.
 
 ## Başlatma
 
@@ -203,3 +204,16 @@ docs/wiki/
 ```
 
 "proje bu konu hakkında ne biliyor / neden böyle karar verdi?" sorusunu cevaplar.
+
+## Execution role seçimi
+
+Markdown task source execution role'den bağımsızdır. Aynı
+`docs/project/tasks/TODO-001.md` için Claude-only ve Codex-only normal
+`full_lifecycle` kullanım geçerlidir. İstenirse Claude source/run'ı
+çözüp PLAN/FREEZE yapar, Codex'i açık `implementation_worker` olarak
+çağırır, sonra Claude VERIFY/REVIEW'e döner.
+
+Worker source task veya frozen PLAN'ı değiştirmez. PLAN dışı path ya da
+material karar gerektiğinde durur ve orchestrator'a blocker döndürür.
+Claude → Codex normal resume ise delegation değildir: normal Codex aynı
+repository run state'inden full lifecycle'a devam eder.

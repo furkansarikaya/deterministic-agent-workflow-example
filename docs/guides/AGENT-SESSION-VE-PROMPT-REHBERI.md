@@ -723,3 +723,110 @@ agent'a mevcut state'ten otonom devam etmesini söyle.
     execution katmanıdır.
 12. Küçük task küçük context, küçük plan, küçük diff ve odaklı
     verification üretmelidir.
+
+------------------------------------------------------------------------
+
+# 16. Execution role: resume mi, delegation mı?
+
+Agent identity ile execution role aynı şey değildir. Normal Claude ve
+normal Codex invocation'ı `full_lifecycle` rolündedir: ikisi de TASK'tan
+CODE DONE'a kadar aynı deterministic run'ı tek başına yürütebilir.
+
+```text
+Claude-only  → Claude: full_lifecycle
+Codex-only   → Codex: full_lifecycle
+```
+
+`implementation_worker` yalnızca orchestrator'un açıkça verdiği bounded
+invocation'dır. Örneğin Claude plan/freeze yapıp Codex'i
+`AGENT_ROLE=implementation_worker` ile çağırabilir. Codex yalnız frozen
+TASK/EVIDENCE/PLAN içindeki implementation'ı yapar ve Claude'a döner;
+VERIFY, REVIEW ve CODE DONE Claude'da kalır.
+
+## Resume ≠ delegation
+
+**Cross-agent resume** örneğinde Claude session'ı biter ve Codex normal
+başlatılırsa Codex `full_lifecycle` olur; repository state'ten aynı run'ı
+okur ve tamamlanmış DISCOVER/PLAN aşamalarını tekrarlamadan devam eder.
+
+**Delegation** örneğinde Claude lifecycle owner olarak kalır ve Codex
+açık worker rolüyle yalnız implementation yapar. Yani:
+
+```text
+1 task = 1 deterministic run.
+Session/model = persistent workflow state değildir.
+```
+
+Kalıcı kaynak Git ve `.agents/runs/<TASK-ID>/` içeriğidir; agent'ların
+birbirinin chat geçmişine erişmesi gerekmez.
+
+## Delegated worker sınırı ve bounded fix
+
+Worker DISCOVER/PLAN/EVIDENCE/freeze/review/CODE DONE/delivery/knowledge
+işlemi yapmaz ve başka agent delege etmez. PLAN dışı path, material API
+veya architecture kararı, çelişkili evidence ya da yetkisiz irreversible
+işlem görürse durur ve blocker'ı orchestrator'a döndürür.
+
+```text
+Claude VERIFY/REVIEW fail
+→ Claude focused fix instruction
+→ Codex implementation_worker
+→ implementation-only fix
+→ Claude VERIFY/REVIEW
+```
+
+Bu bounded QA loop'tur; worker kendi kendini yeniden çağırmaz.
+
+### Cross-agent full-lifecycle resume prompt
+
+English:
+
+```text
+Resume the currently active deterministic task in full-lifecycle mode.
+
+Resolve the active run from repository state, validate only the required persisted state, determine the last valid workflow state, and continue autonomously from there.
+
+Do not redo completed workflow states.
+Do not rely on previous chat history.
+```
+
+Türkçe:
+
+```text
+Mevcut aktif deterministic task'a full_lifecycle modunda devam et.
+
+Active run'ı repository state'ten çöz, yalnız gerekli kalıcı state'i doğrula, son geçerli workflow state'ini belirle ve buradan otonom devam et.
+
+Tamamlanmış workflow state'lerini tekrar yapma.
+Önceki chat geçmişine dayanma.
+```
+
+### Delegated implementation worker prompt
+
+English:
+
+```text
+Act as the implementation worker for the currently active deterministic task.
+
+Consume the already-frozen TASK, EVIDENCE, and PLAN. Implement only the authorized application scope.
+
+Do not redo discovery or planning. Do not review, mark CODE DONE, deliver, modify knowledge, or delegate further.
+
+If the implementation requires a material planning or scope change, stop and return the blocker.
+
+When implementation is complete, report the changed paths and focused implementation checks, then return control to the orchestrator.
+```
+
+Türkçe:
+
+```text
+Mevcut aktif deterministic task için implementation worker olarak davran.
+
+Önceden freeze edilmiş TASK, EVIDENCE ve PLAN'ı kullan. Yalnız yetkili application scope'u uygula.
+
+Discovery veya planning'i tekrar yapma. Review, CODE DONE, delivery, knowledge değişikliği veya başka delegation yapma.
+
+Implementation material bir planning veya scope değişikliği gerektirirse dur ve blocker'ı döndür.
+
+Implementation bitince changed path'leri ve odaklı implementation check'lerini raporla, sonra control'ü orchestrator'a döndür.
+```

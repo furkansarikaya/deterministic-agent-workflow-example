@@ -3,10 +3,13 @@ set -eu
 
 root=$(CDPATH= cd "$(dirname "$0")/.." && pwd)
 config=$root/.agents/config.yaml
+execution_role=${AGENT_ROLE:-full_lifecycle}
 hash_file() { shasum -a 256 "$1" | awk '{print $1}'; }
 run_dir() { printf '%s/.agents/runs/%s\n' "$root" "$1"; }
 config_value() { sed -n "s/^$1: *//p" "$2" | head -n 1 | tr -d '"'; }
 fail() { echo "$*" >&2; return 1; }
+valid_role() { case "$execution_role" in full_lifecycle|implementation_worker) ;; *) fail "invalid execution role: $execution_role";; esac; }
+require_full_lifecycle() { [ "$execution_role" = full_lifecycle ] || fail "command denied for implementation_worker"; }
 
 valid_task_id() { case "$1" in *[!A-Za-z0-9_-]*|'') return 1;; esac; }
 
@@ -331,19 +334,40 @@ fixture_test() {
   echo 'agent control tests passed'
 }
 
+role_test() {
+  tmp=$(mktemp -d /tmp/deterministic-role.XXXXXX); trap 'rm -rf "$tmp"' EXIT
+  mkdir -p "$tmp/.agents/runs/ROLE/review" "$tmp/.agents/modes" "$tmp/scripts"
+  cp "$root/scripts/agent.sh" "$tmp/scripts/"; cp "$root/.agents/config.yaml" "$tmp/.agents/"; cp "$root/.agents/modes/"*.yaml "$tmp/.agents/modes/"
+  printf 'ROLE\n' > "$tmp/.agents/ACTIVE_RUN"; printf '# Task\n' > "$tmp/.agents/runs/ROLE/TASK.md"; printf '# Evidence\n' > "$tmp/.agents/runs/ROLE/EVIDENCE.md"
+  printf '%s\n' '---' 'scope:' '  - path: authorized.txt' '    criteria: [AC-1]' '---' '# Plan' > "$tmp/.agents/runs/ROLE/PLAN.md"
+  printf '%s\n' 'repository:' '  base_sha: PENDING' 'task_source:' '  type: none' '  revision: not_applicable' 'execution:' '  mode: deterministic' '  profile: core' '  state: PLANNING' 'freeze:' '  task_sha256: PENDING' '  evidence_sha256: PENDING' '  plan_sha256: PENDING' '  policy_sha256: PENDING' 'baseline:' '  status: pending' 'handoff:' '  state: PLANNED' '  verification_patch_sha256: PENDING' '  review_patch_sha256: PENDING' '  code_done_patch_sha256: PENDING' > "$tmp/.agents/runs/ROLE/RUN.yaml"
+  printf '# review\n' > "$tmp/.agents/runs/ROLE/review/code-review.md"; printf '# verification\n' > "$tmp/.agents/runs/ROLE/review/verification.md"; printf '# result\n' > "$tmp/.agents/runs/ROLE/RESULT.md"
+  (cd "$tmp"; git init -q; git config user.email role@example.invalid; git config user.name fixture; : > authorized.txt; git add -- .agents scripts authorized.txt; git commit -qm baseline
+    ./scripts/agent.sh role | grep -Fxq 'role=full_lifecycle'; AGENT_ROLE=full_lifecycle ./scripts/agent.sh role | grep -Fxq 'role=full_lifecycle'
+    ./scripts/agent.sh baseline ROLE; ./scripts/agent.sh freeze ROLE; printf 'implementation\n' >> authorized.txt
+    AGENT_ROLE=implementation_worker ./scripts/agent.sh role | grep -Fxq 'role=implementation_worker'; AGENT_ROLE=implementation_worker ./scripts/agent.sh verify-scope ROLE; AGENT_ROLE=implementation_worker ./scripts/agent.sh handoff ROLE IMPLEMENTING
+    if AGENT_ROLE=implementation_worker ./scripts/agent.sh handoff ROLE VERIFIED; then exit 1; fi; if AGENT_ROLE=implementation_worker ./scripts/agent.sh handoff ROLE REVIEWED; then exit 1; fi; if AGENT_ROLE=implementation_worker ./scripts/agent.sh handoff ROLE CODE_DONE; then exit 1; fi; if AGENT_ROLE=implementation_worker ./scripts/agent.sh freeze ROLE; then exit 1; fi; if AGENT_ROLE=implementation_worker ./scripts/agent.sh refreeze ROLE 001.md; then exit 1; fi; if AGENT_ROLE=implementation_worker ./scripts/agent.sh delivery-check ROLE; then exit 1; fi
+    ./scripts/agent.sh handoff ROLE VERIFIED
+    printf 'unplanned\n' > unplanned.txt; if AGENT_ROLE=implementation_worker ./scripts/agent.sh verify-scope ROLE; then exit 1; fi)
+  echo 'agent role tests passed'
+}
+
+valid_role
 command=${1:-}; case "$command" in
+  role) printf 'role=%s\n' "$execution_role" ;;
   status) id=$(active_run); echo "active_task=${id:-none}"; echo "implementation_allowed=$( [ -n "$id" ] && echo true || echo false )"; effective "$id" ;;
   effective) effective "${2:-}" ;;
-  baseline) baseline "${2:?usage: $0 baseline <TASK-ID>}" ;;
-  freeze) freeze "${2:?usage: $0 freeze <TASK-ID>}" ;;
-  refreeze) freeze "${2:?usage: $0 refreeze <TASK-ID> <AMENDMENT>}" refreeze "${3:?usage: $0 refreeze <TASK-ID> <AMENDMENT>}" ;;
+  baseline) require_full_lifecycle; baseline "${2:?usage: $0 baseline <TASK-ID>}" ;;
+  freeze) require_full_lifecycle; freeze "${2:?usage: $0 freeze <TASK-ID>}" ;;
+  refreeze) require_full_lifecycle; freeze "${2:?usage: $0 refreeze <TASK-ID> <AMENDMENT>}" refreeze "${3:?usage: $0 refreeze <TASK-ID> <AMENDMENT>}" ;;
   verify-freeze) verify_freeze "${2:?usage: $0 verify-freeze <TASK-ID>}" ;;
   verify-scope) verify_scope "${2:?usage: $0 verify-scope <TASK-ID>}" ;;
   freshness) verify_freshness "${2:?usage: $0 freshness <TASK-ID>}" ;;
-  handoff) record_handoff "${2:?usage: $0 handoff <TASK-ID> <PHASE>}" "${3:?usage: $0 handoff <TASK-ID> <PHASE>}" ;;
+  handoff) [ "$execution_role" = full_lifecycle ] || [ "${3:-}" = IMPLEMENTING ] || fail "handoff phase denied for implementation_worker"; record_handoff "${2:?usage: $0 handoff <TASK-ID> <PHASE>}" "${3:?usage: $0 handoff <TASK-ID> <PHASE>}" ;;
   verify-handoff) verify_handoff "${2:?usage: $0 verify-handoff <TASK-ID>}" ;;
-  delivery-check) delivery_check "${2:?usage: $0 delivery-check <TASK-ID>}" ;;
+  delivery-check) require_full_lifecycle; delivery_check "${2:?usage: $0 delivery-check <TASK-ID>}" ;;
   validate) id=${2:?usage: $0 validate <TASK-ID>}; require_run "$id"; dir=$(run_dir "$id"); for f in TASK.md EVIDENCE.md PLAN.md RUN.yaml review/code-review.md review/verification.md RESULT.md; do [ -f "$dir/$f" ] || fail "missing required artifact: $f"; done; validate_control_artifacts "$id"; scope_mappings "$dir/PLAN.md" >/dev/null; status=$(baseline_status "$dir"); if [ "$status" = captured ]; then validate_captured_baseline "$dir"; else historical_reference "$id" || fail "baseline missing or pending: $id"; fi; verify_freshness "$id"; verify_handoff "$id"; echo "run validated: $id" ;;
-  test) fixture_test ;;
-  *) echo "usage: $0 {status|effective|baseline|freeze|refreeze|verify-freeze|freshness|handoff|verify-handoff|delivery-check|validate|test} [TASK-ID]" >&2; exit 2 ;;
+  test) require_full_lifecycle; fixture_test ;;
+  role-test) require_full_lifecycle; role_test ;;
+  *) echo "usage: $0 {role|status|effective|baseline|freeze|refreeze|verify-freeze|freshness|handoff|verify-handoff|delivery-check|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
 esac

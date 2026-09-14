@@ -1127,3 +1127,24 @@ büyük task
 ```
 
 Control plane işi kolaylaştırmıyorsa yanlış kullanılıyordur.
+
+---
+
+# 36. TodoFlow execution seçenekleri
+
+TodoFlow task'ı üç şekilde yürütülebilir:
+
+```text
+Claude-only  → Claude full_lifecycle; VERIFY/REVIEW Claude'da
+Codex-only   → Codex full_lifecycle; VERIFY/REVIEW Codex'te
+Claude + Codex → Claude plan/freeze/VERIFY/REVIEW, Codex implementation_worker
+```
+
+Üçüncü modelde Codex frozen contract içindeki implementation'dan sonra
+Claude'a döner. Codex worker PLAN'ı değiştirmez, review yapmaz veya CODE
+DONE işaretlemez. Claude VERIFY/REVIEW fail bulursa aynı bounded scope
+içinde focused fix için worker'ı yeniden çağırabilir.
+
+Claude'dan Codex'e normal session devri ise worker delegation değildir:
+Codex normal başlatıldıysa `full_lifecycle` olarak aynı run'a repository
+state'ten devam eder.

@@ -6,3 +6,4 @@ Profile means capabilities; mode means permitted behavior. This example allows t
 
 Host hooks are globally controlled, so these denials are policy-only here. Actual core `credential-deny` is platform-enforced only if installed/active. Claude-only model metadata is never reused for Codex.
 
+An explicit `implementation_worker` invocation allows implementation capability only. Recursive orchestration, swarm, and delegation remain denied by role policy in that invocation; standalone Claude and Codex retain the default `full_lifecycle` role.

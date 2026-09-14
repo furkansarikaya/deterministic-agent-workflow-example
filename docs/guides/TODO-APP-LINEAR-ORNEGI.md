@@ -155,3 +155,19 @@ kullan.
 Agent yalnız aktif issue'yu ve ilgili repository evidence'ını okumalıdır.
 
 Tüm Linear project/cycle/backlog context'e yüklenmemelidir.
+
+## Execution role örneği
+
+Linear yalnız task-management bağlamıdır; execution role'ü belirlemez.
+
+```text
+Linear TODO-123
+→ Claude run'ı çözer/oluşturur, PLAN/FREEZE yapar
+→ explicit Codex implementation_worker
+→ Claude VERIFY/REVIEW
+→ izin varsa task-management güncellemesi
+```
+
+Codex-only `full_lifecycle` kullanım da geçerlidir; Linear zorunlu
+değildir. Claude → Codex normal resume ile delegated worker invocation
+farklıdır: normal başlayan Codex aynı run'ın tüm lifecycle'ını sürdürebilir.
