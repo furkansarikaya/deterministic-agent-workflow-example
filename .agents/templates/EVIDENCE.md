@@ -2,7 +2,7 @@
 
 ## Repository
 
-Baseline SHA: `<real git SHA>`
+Repository base SHA: record the value from `RUN.yaml` (`repository.base_sha`).
 
 Inspected paths:
 

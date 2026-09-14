@@ -4,7 +4,7 @@ task:
   id: <TASK-ID>
 
 repository:
-  sha: <BASELINE-REPOSITORY-SHA>
+  base_sha: PENDING
 
 execution:
   mode: deterministic

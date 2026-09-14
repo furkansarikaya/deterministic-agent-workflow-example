@@ -1,5 +1,5 @@
 # Git and safety rules
 
-Inspect `git status --short` before work. User changes are user-owned: do not reset, overwrite, stage, discard, or claim them. For an active task, record them with `./scripts/agent.sh baseline <TASK-ID>` before implementation; this records fingerprints, not contents. No force push, rebase, destructive Git command, credential access/logging, arbitrary network request, destructive migration, or irreversible external action without explicit authorization.
+Inspect `git status --short` before work. User changes are user-owned: do not reset, overwrite, stage, discard, or claim them. For an active task, record them with `./scripts/agent.sh baseline <TASK-ID>` before DISCOVER; this records fingerprints, not contents. No force push, rebase, destructive Git command, credential access/logging, arbitrary network request, destructive migration, or irreversible external action without explicit authorization.
 
 Do not commit unless task execution requires a real baseline or the user requests it. Before DONE inspect status, name-only diff, stat, and actual diff. Every task-owned path must be frozen-authorized and map to an acceptance criterion.

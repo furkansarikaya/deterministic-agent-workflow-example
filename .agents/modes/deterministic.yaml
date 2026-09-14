@@ -12,6 +12,16 @@ plan:
 scope:
   frozen: true
   unexpected_files: block
+context:
+  strategy: progressive_disclosure
+  control_plane: on_demand
+  wiki:
+    default: on_demand
+    index_first: true
+    expand_only_if_needed: true
+  history:
+    load_unrelated_runs: false
+    include_session_history_in_review: false
 wiki:
   read: true
   write_during_code_transaction: false

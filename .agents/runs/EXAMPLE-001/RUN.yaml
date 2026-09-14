@@ -61,7 +61,7 @@ verification:
   independent: true
   result: pass
   artifact: review/verification.md
-  commands: [./scripts/verify.sh, ./scripts/agent.sh verify-freeze EXAMPLE-001, ./scripts/agent.sh verify-scope EXAMPLE-001, ./scripts/wiki-lint.sh]
+  historical_execution_commands: [./scripts/verify.sh, ./scripts/agent.sh verify-freeze EXAMPLE-001, ./scripts/agent.sh verify-scope EXAMPLE-001, ./scripts/wiki-lint.sh]
 
 bounded_fix:
   maximum_attempts: 2

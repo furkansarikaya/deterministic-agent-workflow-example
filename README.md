@@ -23,7 +23,13 @@ Codex starts at [AGENTS.md](AGENTS.md); Claude Code starts at [CLAUDE.md](CLAUDE
 ./scripts/agent.sh status
 ```
 
-Read its TASK, EVIDENCE, PLAN, then DISCOVER read-only. IMPLEMENT requires a valid freeze and plan mapping:
+For a new run, create it from templates, set `ACTIVE_RUN`, read its TASK, then capture the task-start baseline before DISCOVER:
+
+```sh
+./scripts/agent.sh baseline <TASK-ID>
+```
+
+Then DISCOVER read-only, build EVIDENCE and PLAN, freeze and verify them, implement, verify application scope, review, and reach CODE DONE. Only then run `/wiki-ingest` and `/wiki-lint` as Transaction B:
 
 ```sh
 ./scripts/agent.sh freeze <TASK-ID>
@@ -31,14 +37,9 @@ Read its TASK, EVIDENCE, PLAN, then DISCOVER read-only. IMPLEMENT requires a val
 ./scripts/agent.sh verify-scope <TASK-ID>
 ```
 
-The checked-in template intentionally leaves `.agents/ACTIVE_RUN` empty. `status` then reports `active_task=none` and implementation is blocked. A real application task explicitly sets exactly one existing run ID, records its dirty-worktree baseline, then proceeds:
+The checked-in template intentionally leaves `.agents/ACTIVE_RUN` empty. `status` then reports `active_task=none` and implementation is blocked. The YAML policy in `.agents/modes/` is machine-readable; the shared Markdown files explain the rules. Templates for the next run live in `.agents/templates/`.
 
-```sh
-./scripts/agent.sh baseline <TASK-ID>
-./scripts/agent.sh freeze <TASK-ID>
-```
-
-The YAML policy in `.agents/modes/` is machine-readable; the shared Markdown files explain the rules. Templates for the next run live in `.agents/templates/`.
+Deterministic does not mean loading everything: TASK and current repository/tests are the default context. Load detailed control guidance and wiki pages only when the current evidence is insufficient; wiki traversal starts at the index and never bulk-loads the graph or unrelated run history.
 
 ## Capability and knowledge boundaries
 
