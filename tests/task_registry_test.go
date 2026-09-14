@@ -56,3 +56,31 @@ func TestRegistryReportsMissingTask(t *testing.T) {
 		t.Fatalf("Complete(missing) error = %v, want ErrTaskNotFound", err)
 	}
 }
+
+func TestRegistryFindsTaskWithoutChangingState(t *testing.T) {
+	registry := src.NewTaskRegistry()
+	created, err := registry.Create("inspect evidence")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	found, err := registry.Find(created.ID)
+	if err != nil {
+		t.Fatalf("Find() error = %v", err)
+	}
+	if found != created {
+		t.Fatalf("Find() = %#v, want %#v", found, created)
+	}
+	if got := registry.List(); len(got) != 1 || got[0] != created {
+		t.Fatalf("Find() changed state: %#v", got)
+	}
+}
+
+func TestRegistryFindReportsMissingTask(t *testing.T) {
+	registry := src.NewTaskRegistry()
+
+	_, err := registry.Find(99)
+	if !errors.Is(err, src.ErrTaskNotFound) {
+		t.Fatalf("Find(missing) error = %v, want ErrTaskNotFound", err)
+	}
+}

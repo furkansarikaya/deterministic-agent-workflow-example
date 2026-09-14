@@ -2,21 +2,22 @@ task:
   id: EXAMPLE-001
 
 repository:
-  sha: PENDING-V2-BASELINE
+  sha: eb2547a
 
 execution:
   mode: deterministic
   profile: core
-  state: PLANNED
+  state: CODE_DONE
+  knowledge_state: KNOWLEDGE_DONE
 
 freeze:
-  task_sha256: PENDING
-  evidence_sha256: PENDING
-  plan_sha256: PENDING
-  policy_sha256: PENDING
+  task_sha256: "cd8b59e780ebc9a6ee28542acec5e649a1f564fa203ebfa38a1ee59de1888735"
+  evidence_sha256: "43e6a6e1e81357d70611cc2d822ee67f288b6ff39f221d9cef4aca6086c80a3a"
+  plan_sha256: "bc004523f16e0340b7c4201878c24a4854f05996f1e4f9ce747613ddada7be36"
+  policy_sha256: "430838593e9fb36c084cb343fd76fdb1e9bcfccce20f551be36c74a5d957b685"
 
 knowledge:
-  repository_sha: PENDING-V2-BASELINE
+  repository_sha: eb2547a
   evidence:
     entities: [task-registry]
     decisions: [use-in-memory-storage-for-example]
@@ -44,21 +45,20 @@ workers:
 
 environment:
   runtime:
-    go: PENDING-AT-FREEZE
+    go: go1.26.2
   os: darwin-arm64
 
 review:
   required: true
-  result: pending
+  result: pass
   artifact: review/code-review.md
 
 verification:
   independent: true
-  result: pending
+  result: pass
   artifact: review/verification.md
   commands: [./scripts/verify.sh, ./scripts/agent-run.sh verify-freeze EXAMPLE-001, ./scripts/check-scope.sh EXAMPLE-001, ./scripts/wiki-lint.sh]
 
 bounded_fix:
   maximum_attempts: 2
   attempts_used: 0
-

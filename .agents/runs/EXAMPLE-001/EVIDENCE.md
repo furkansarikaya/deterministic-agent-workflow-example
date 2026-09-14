@@ -2,7 +2,7 @@
 
 ## Repository
 
-Baseline SHA: `PENDING-V2-BASELINE`
+Baseline SHA: `eb2547a`
 
 Inspected paths:
 
@@ -30,5 +30,4 @@ Inspected paths:
 ## Freeze metadata
 
 Version: v1  
-Frozen only after actual baseline SHA replaces the pending marker and `agent-run.sh freeze EXAMPLE-001` records hashes.
-
+Baseline established before this task's implementation. `agent-run.sh freeze EXAMPLE-001` records hashes before IMPLEMENT.

@@ -44,6 +44,15 @@ func (r *TaskRegistry) List() []Task {
 	return append([]Task(nil), r.tasks...)
 }
 
+func (r *TaskRegistry) Find(id int) (Task, error) {
+	for _, task := range r.tasks {
+		if task.ID == id {
+			return task, nil
+		}
+	}
+	return Task{}, ErrTaskNotFound
+}
+
 func (r *TaskRegistry) Complete(id int) (Task, error) {
 	for index, task := range r.tasks {
 		if task.ID != id {
