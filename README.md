@@ -41,23 +41,30 @@ Then DISCOVER read-only, build EVIDENCE and PLAN (declaring a `tdd_exemption` pe
 ./scripts/agent.sh delivery-check <TASK-ID>
 ```
 
-### Implementation: Claude orchestrates, Codex implements
+### Execution topology: standalone vs. orchestrated
 
-For any run created from the current templates (`RUN.yaml` carries `worker_evidence:`/`tdd:`/`completion_report:`), `full_lifecycle` (Claude) cannot advance past IMPLEMENT by editing application files itself — `agent.sh handoff <TASK-ID> VERIFIED` requires recorded `implementation_worker` RED+GREEN (or a validated `tdd_exemption`) evidence per scope path. Invoke that worker the one canonical way:
-
-```sh
-./scripts/worker-run.sh <TASK-ID> RED  --network not-required --prompt-file <prompt.md>
-./scripts/worker-run.sh <TASK-ID> GREEN --network not-required --prompt-file <prompt.md>
-```
-
-`worker-run.sh` shells out to the real `codex exec` CLI with `AGENT_ROLE=implementation_worker` set for that subprocess only; a missing `codex` binary or a non-zero exit is a hard failure — it never falls back to `full_lifecycle` implementing the change itself. Declare `--network required` only when EVIDENCE.md already established the task needs it (e.g. resolving a new dependency); a wrong guess wastes a whole invocation, exactly as it did for the KnowWeave sibling repository's first real worker invocation. Model and reasoning effort are read from the operator's own `~/.codex/config.toml` unless `--model`/`--effort` is passed explicitly — this repository does not pin a model.
-
-The prompt given to Codex must instruct it to record its own evidence as it goes, e.g.:
+For any run created from the current templates (`RUN.yaml` carries `worker_evidence:`/`tdd:`/`completion_report:`), `agent.sh resolve_topology` decides *how* implementation happens — not Claude, not Codex, not this reference repository unconditionally:
 
 ```sh
-printf 'command: <test command>\ntarget: <scope path>\nexpected_failure: <specific reason>\n' \
-  | ./scripts/agent.sh worker-evidence <TASK-ID> RED fail
+./scripts/agent.sh effective <TASK-ID>   # includes the resolved execution topology
 ```
+
+- **`standalone`** (this repository's own default — see `.agents/config.yaml`) — the active `full_lifecycle` agent, whichever it is, implements RED/GREEN itself and records that evidence under its own role:
+  ```sh
+  printf 'command: <test command>\ntarget: <scope path>\nexpected_failure: <specific reason>\n' \
+    | ./scripts/agent.sh worker-evidence <TASK-ID> RED fail
+  # ... implement ...
+  printf 'command: <test command>\ntarget: <scope path>\n' | ./scripts/agent.sh worker-evidence <TASK-ID> GREEN pass
+  ```
+  No `implementation_worker` delegation happens or is required; `agent.sh handoff <TASK-ID> VERIFIED` still requires this RED+GREEN pair (or a validated `tdd_exemption`) — standalone is never a way to skip TDD, only a way to skip *delegation*.
+- **`orchestrated`** — `full_lifecycle` cannot advance past IMPLEMENT by editing application files itself; `agent.sh handoff <TASK-ID> VERIFIED` requires recorded `implementation_worker` RED+GREEN (or a validated `tdd_exemption`) evidence per scope path, authored by that role specifically. Invoke that worker the one canonical way this repository wires (its own Codex adapter — a different consuming project may wire a different tool the same way):
+  ```sh
+  ./scripts/worker-run.sh <TASK-ID> RED  --network not-required --prompt-file <prompt.md>
+  ./scripts/worker-run.sh <TASK-ID> GREEN --network not-required --prompt-file <prompt.md>
+  ```
+  `worker-run.sh` shells out to the real `codex exec` CLI with `AGENT_ROLE=implementation_worker` set for that subprocess only, and refuses to run at all against a `standalone`-topology run; a missing `codex` binary or a non-zero exit is a hard failure — it never falls back to `full_lifecycle` implementing the change itself. Declare `--network required` only when EVIDENCE.md already established the task needs it (e.g. resolving a new dependency); a wrong guess wastes a whole invocation, exactly as it did for the KnowWeave sibling repository's first real worker invocation. Model and reasoning effort are read from the operator's own `~/.codex/config.toml` unless `--model`/`--effort` is passed explicitly — this repository does not pin a model. The prompt given to Codex must instruct it to record its own evidence as it goes, using the same `agent.sh worker-evidence` invocation shown above.
+
+A run selects its topology by setting `RUN.yaml`'s `execution.topology` to `standalone` or `orchestrated`; omitting it inherits `.agents/config.yaml`'s `default_topology`. See `.agents/WORKFLOW.md`'s "Execution topology" section for the full generic semantics.
 
 ### Task completion
 

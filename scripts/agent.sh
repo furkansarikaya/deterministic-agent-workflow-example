@@ -10,14 +10,6 @@ config_value() { sed -n "s/^$1: *//p" "$2" | head -n 1 | tr -d '"'; }
 fail() { echo "$*" >&2; return 1; }
 valid_role() { case "$execution_role" in full_lifecycle|implementation_worker) ;; *) fail "invalid execution role: $execution_role";; esac; }
 require_full_lifecycle() { [ "$execution_role" = full_lifecycle ] || fail "command denied for implementation_worker"; }
-# Mirror of require_full_lifecycle: some operations (recording worker evidence) are only
-# meaningful, and only authorized, when performed by a process actually running with
-# AGENT_ROLE=implementation_worker. This cannot prove the calling process was genuinely
-# Codex rather than a full_lifecycle session that merely exported the same env var (see
-# .agents/ENFORCEMENT.md "Evidence strength" — role identity remains declared, not
-# cryptographically proven); the optional Codex-session cross-check in
-# verify_worker_evidence narrows, but does not close, that residual gap.
-require_implementation_worker() { [ "$execution_role" = implementation_worker ] || fail "command requires AGENT_ROLE=implementation_worker"; }
 
 valid_task_id() { case "$1" in *[!A-Za-z0-9_-]*|'') return 1;; esac; }
 
@@ -340,6 +332,47 @@ EOF
 # ---------------------------------------------------------------------------
 policy_enforced() { section_key_present "$1" worker_evidence required; }
 
+# Execution topology is a separate concept from agent role: it says whether
+# a run needs a second, delegated implementation owner at all, not which
+# vendor plays which part. `standalone` — the active full_lifecycle agent
+# implements its own RED/GREEN evidence (no implementation_worker required
+# or expected). `orchestrated` — full_lifecycle must delegate RED/GREEN/
+# REFACTOR/fix implementation to implementation_worker and must not
+# implement application code itself. A run's own RUN.yaml
+# (execution.topology) wins when set to a valid value; otherwise this falls
+# back to .agents/config.yaml's default_topology. Fails closed if neither
+# resolves to a valid value, rather than silently guessing a topology.
+resolve_topology() {
+  dir=$1
+  topology=$(section_value "$dir" execution topology)
+  case "$topology" in standalone|orchestrated) printf '%s\n' "$topology"; return 0 ;; esac
+  topology=$(config_value default_topology "$config")
+  case "$topology" in
+    standalone|orchestrated) printf '%s\n' "$topology"; return 0 ;;
+    *) fail "no valid execution topology resolved: set execution.topology in RUN.yaml or default_topology in .agents/config.yaml" ;;
+  esac
+}
+# The single agent role expected to author RED/GREEN/REFACTOR/FIX
+# implementation evidence under a given topology. This is the only place
+# topology is translated into a role expectation — everything else
+# (record_worker_evidence, valid_evidence_file) consumes this, never
+# hardcodes "implementation_worker" or "full_lifecycle" as a universal owner.
+# Caveat (see .agents/ENFORCEMENT.md "Evidence strength"): this cannot
+# cryptographically prove which process recorded a given evidence file —
+# AGENT_ROLE remains a declared claim, not a proven identity, in both
+# directions (a full_lifecycle session could still export
+# AGENT_ROLE=implementation_worker itself in orchestrated mode, exactly as
+# it could claim AGENT_ROLE=full_lifecycle in standalone mode). The optional
+# Codex-session cross-check in valid_evidence_file narrows, but does not
+# close, that residual gap.
+expected_implementation_owner() {
+  case "$1" in
+    standalone) printf 'full_lifecycle\n' ;;
+    orchestrated) printf 'implementation_worker\n' ;;
+    *) fail "invalid execution topology: $1" ;;
+  esac
+}
+
 # A small denylist of non-answers. This cannot judge whether a justification
 # is semantically correct (that remains a human/reviewer judgment, recorded
 # in review/code-review.md — see the RED-VALIDATED convention below); it only
@@ -370,8 +403,10 @@ evidence_field() { sed -n "s/^$2: *//p" "$1" | head -1 | tr -d '"'; }
 evidence_targets() { sed -n 's/^target: *//p' "$1" | head -1 | tr ',' '\n'; }
 evidence_covers_path() { evidence_targets "$1" | grep -Fxq "$2"; }
 
-# Records one worker-evidence file for the active run's current IMPLEMENTING
-# phase. Only callable by implementation_worker, only while the run's own
+# Records one implementation-evidence file for the active run's current
+# IMPLEMENTING phase. The role allowed to call this is derived from the
+# run's resolved execution topology (see expected_implementation_owner) —
+# never hardcoded to implementation_worker — only while the run's own
 # frozen plan/evidence/task hashes are the ones this file records against —
 # a later refreeze (amendment) makes every prior evidence file stale for
 # verify_worker_evidence even though the files themselves are never deleted
@@ -381,7 +416,9 @@ evidence_covers_path() { evidence_targets "$1" | grep -Fxq "$2"; }
 # (comma-separated scope paths), and, for phase=RED only, expected_failure.
 record_worker_evidence() {
   id=$1 phase=$2 result=$3; require_run "$id"; dir=$(run_dir "$id")
-  require_implementation_worker
+  topology=$(resolve_topology "$dir") || return 1
+  expected_role=$(expected_implementation_owner "$topology") || return 1
+  [ "$execution_role" = "$expected_role" ] || fail "command requires AGENT_ROLE=$expected_role for this run's execution topology ($topology)"
   case "$phase" in RED|GREEN|REFACTOR|FIX) ;; *) fail "invalid worker-evidence phase: $phase" ;; esac
   case "$result" in pass|fail) ;; *) fail "invalid worker-evidence result: $result (want pass|fail)" ;; esac
   [ "$(section_value "$dir" handoff state)" = IMPLEMENTING ] || fail "worker evidence may only be recorded while handoff state is IMPLEMENTING"
@@ -412,6 +449,7 @@ record_worker_evidence() {
     printf 'phase: "%s"\n' "$phase"
     printf 'result: "%s"\n' "$result"
     printf 'role: "%s"\n' "$execution_role"
+    printf 'topology: "%s"\n' "$topology"
     printf 'command: %s\n' "$command_text"
     printf 'target: %s\n' "$target_text"
     [ "$phase" = RED ] && printf 'expected_failure: %s\n' "$expected_failure"
@@ -426,20 +464,24 @@ record_worker_evidence() {
   echo "worker evidence recorded: $id $phase-$seq ($result)"
 }
 
-# Structural, task/freeze-bound validity of one evidence file: current role
-# claim aside (see require_implementation_worker's caveat), this checks
+# Structural, task/freeze/topology-bound validity of one evidence file:
+# current role claim aside (a script cannot cryptographically prove which
+# process recorded it — see AGENT_ROLE's caveat elsewhere), this checks
 # everything a script legitimately can — it belongs to this task, it was
 # recorded against the exact plan/evidence/task hashes currently frozen (a
-# stale or cross-task file fails), and, when a local Codex session log
-# directory is discoverable, an optional cross-check that the referenced
-# Codex session actually exists and ran against this repository.
+# stale or cross-task file fails), it was authored by the role this run's
+# CURRENT resolved execution topology expects (not a hardcoded vendor — a
+# standalone run rejects implementation_worker-authored evidence exactly as
+# an orchestrated run rejects full_lifecycle-authored evidence), and, when a
+# local Codex session log directory is discoverable, an optional cross-check
+# that a referenced Codex session actually exists and ran against this repo.
 valid_evidence_file() {
-  id=$1 dir=$2 file=$3
+  id=$1 dir=$2 file=$3 expected_role=$4
   [ "$(evidence_field "$file" task_id)" = "$id" ] || return 1
   [ "$(evidence_field "$file" task_sha256)" = "$(section_value "$dir" freeze task_sha256)" ] || return 1
   [ "$(evidence_field "$file" evidence_sha256)" = "$(section_value "$dir" freeze evidence_sha256)" ] || return 1
   [ "$(evidence_field "$file" plan_sha256)" = "$(section_value "$dir" freeze plan_sha256)" ] || return 1
-  [ "$(evidence_field "$file" role)" = implementation_worker ] || return 1
+  [ "$(evidence_field "$file" role)" = "$expected_role" ] || return 1
   session=$(evidence_field "$file" codex_session_id)
   if [ -n "$session" ] && [ -d "${CODEX_SESSION_DIR:-$HOME/.codex/sessions}" ]; then
     grep -RFl "\"$session\"" "${CODEX_SESSION_DIR:-$HOME/.codex/sessions}" >/dev/null 2>&1 || return 1
@@ -469,16 +511,23 @@ validate_tdd_exemptions() {
 
 # The verification gate for behavior-changing scope: every frozen scope path
 # without a tdd_exemption must have at least one valid RED (result=fail) and
-# at least one valid GREEN-or-FIX (result=pass) worker-evidence file naming
-# it, both bound to the currently frozen plan/evidence/task hashes. A path
-# carrying a validated tdd_exemption needs neither. Skips entirely for a run
-# not subject to this policy (see policy_enforced) or a historical reference.
+# at least one valid GREEN-or-FIX (result=pass) implementation-evidence file
+# naming it, both bound to the currently frozen plan/evidence/task hashes
+# AND authored by the role this run's current execution topology expects
+# (see resolve_topology/expected_implementation_owner — standalone expects
+# full_lifecycle, orchestrated expects implementation_worker; evidence from
+# the other role is rejected exactly like stale or cross-task evidence). A
+# path carrying a validated tdd_exemption needs neither. Skips entirely for
+# a run not subject to this policy (see policy_enforced) or a historical
+# reference.
 verify_worker_evidence() {
   id=$1; require_run "$id"; dir=$(run_dir "$id")
   historical_reference "$id" && { echo "worker-evidence historical reference: $id"; return 0; }
   policy_enforced "$dir" || { echo "worker-evidence not policy-enforced for $id (pre-hardening run)"; return 0; }
   verify_freeze "$id"
   validate_tdd_exemptions "$dir"
+  topology=$(resolve_topology "$dir") || return 1
+  expected_role=$(expected_implementation_owner "$topology") || return 1
   evdir=$(worker_evidence_dir "$id")
   mappings=$(scope_mappings "$dir/PLAN.md") || fail "invalid scope mapping"
   missing_tmp=$(mktemp "${TMPDIR:-/tmp}/agent-missing-evidence.XXXXXX")
@@ -490,19 +539,19 @@ verify_worker_evidence() {
       for f in "$evdir"/RED-*.yaml; do
         [ -e "$f" ] || continue
         evidence_covers_path "$f" "$path" || continue
-        valid_evidence_file "$id" "$dir" "$f" && red_ok=1
+        valid_evidence_file "$id" "$dir" "$f" "$expected_role" && red_ok=1
       done
       for f in "$evdir"/GREEN-*.yaml "$evdir"/FIX-*.yaml; do
         [ -e "$f" ] || continue
         evidence_covers_path "$f" "$path" || continue
-        valid_evidence_file "$id" "$dir" "$f" && green_ok=1
+        valid_evidence_file "$id" "$dir" "$f" "$expected_role" && green_ok=1
       done
     fi
     if [ "$red_ok" != 1 ] || [ "$green_ok" != 1 ]; then printf '%s\n' "$path" >> "$missing_tmp"; fi
   done
   missing=$(cat "$missing_tmp"); rm -f "$missing_tmp"
-  [ -z "$missing" ] || { echo "missing valid RED+GREEN worker evidence (or TDD exemption) for:" >&2; printf '%s\n' "$missing" >&2; fail "worker-evidence verification failed: $id"; }
-  echo "worker-evidence verified: $id"
+  [ -z "$missing" ] || { echo "missing valid RED+GREEN implementation evidence (topology=$topology, expected role=$expected_role; or TDD exemption) for:" >&2; printf '%s\n' "$missing" >&2; fail "worker-evidence verification failed: $id"; }
+  echo "worker-evidence verified: $id (topology=$topology)"
 }
 
 # --- Task Completion Report (task-system agnostic) -------------------------
@@ -714,14 +763,17 @@ role_test() {
   echo 'agent role tests passed'
 }
 
-# Proves the worker-evidence / TDD / completion-report enforcement added on
-# top of the base state machine: a full_lifecycle session cannot silently
-# implement application code and advance past IMPLEMENT (the concrete KW-002
-# bypass), evidence is bound to the current task/freeze (stale and
-# cross-task evidence are rejected), a worker cannot record evidence for an
-# out-of-scope path, a validated TDD exemption substitutes for RED/GREEN,
-# and DONE requires a published, independently-verifiable completion report
-# plus a recorded knowledge-transaction state — never the other way around.
+# Proves the worker-evidence / TDD / completion-report enforcement under
+# execution.topology: orchestrated: a full_lifecycle orchestrator cannot
+# silently implement application code and advance past IMPLEMENT (the
+# concrete KW-002 bypass), evidence is bound to the current task/freeze
+# (stale and cross-task evidence are rejected), evidence must be authored by
+# the role orchestrated topology expects — implementation_worker, not the
+# orchestrator itself — a worker cannot record evidence for an out-of-scope
+# path, a validated TDD exemption substitutes for RED/GREEN, and DONE
+# requires a published, independently-verifiable completion report plus a
+# recorded knowledge-transaction state — never the other way around. See
+# standalone_test for the complementary execution.topology: standalone case.
 policy_test() {
   tmp=$(mktemp -d /tmp/deterministic-policy.XXXXXX); trap 'rm -rf "$tmp"' EXIT
   mkdir -p "$tmp/.agents/runs/POLICY/review" "$tmp/.agents/modes" "$tmp/.agents/task-integrations" "$tmp/scripts" "$tmp/tasks"
@@ -736,7 +788,7 @@ policy_test() {
     '    tdd_exemption: "control-plane configuration constant with no executable behavior to test"' \
     '---' '# Plan' > "$tmp/.agents/runs/POLICY/PLAN.md"
   printf '%s\n' 'repository:' '  base_sha: PENDING' 'task_source:' '  type: local_markdown' '  path: tasks/POLICY.md' '  revision: PENDING' \
-    'execution:' '  mode: deterministic' '  profile: core' '  state: PLANNING' '  knowledge_state: not_started' \
+    'execution:' '  mode: deterministic' '  profile: core' '  state: PLANNING' '  knowledge_state: not_started' '  topology: orchestrated' \
     'freeze:' '  task_sha256: PENDING' '  evidence_sha256: PENDING' '  plan_sha256: PENDING' '  policy_sha256: PENDING' \
     'baseline:' '  status: pending' \
     'handoff:' '  state: PLANNED' '  verification_patch_sha256: PENDING' '  review_patch_sha256: PENDING' '  code_done_patch_sha256: PENDING' \
@@ -771,6 +823,27 @@ policy_test() {
     if printf 'command: go test ./...\ntarget: out-of-scope.txt\n' | AGENT_ROLE=implementation_worker ./scripts/agent.sh worker-evidence POLICY GREEN pass; then
       echo "FAIL: out-of-scope worker evidence was accepted" >&2; exit 1
     fi
+
+    # Orchestrated topology rejects evidence authored by the orchestrator
+    # role, even if it is otherwise perfectly task/freeze/scope bound — this
+    # is the corrected-architecture proof that worker ownership is actually
+    # enforced by role, not merely by whichever role happened to call the
+    # command. Hand-craft what a full_lifecycle-authored file would look
+    # like (record_worker_evidence itself already refuses to write one, so
+    # this simulates one slipping in some other way) and confirm rejection.
+    mkdir -p .agents/runs/POLICY/worker-evidence
+    {
+      printf 'task_id: "POLICY"\nphase: "GREEN"\nresult: "pass"\nrole: "full_lifecycle"\ntopology: "orchestrated"\n'
+      printf 'command: go test ./...\ntarget: impl.txt\n'
+      printf 'base_sha: "%s"\n' "$(git rev-parse HEAD)"
+      printf 'task_sha256: "%s"\n' "$(sed -n 's/^[[:space:]]*task_sha256: *//p' .agents/runs/POLICY/RUN.yaml | head -1 | tr -d '"')"
+      printf 'evidence_sha256: "%s"\n' "$(sed -n 's/^[[:space:]]*evidence_sha256: *//p' .agents/runs/POLICY/RUN.yaml | head -1 | tr -d '"')"
+      printf 'plan_sha256: "%s"\n' "$(sed -n 's/^[[:space:]]*plan_sha256: *//p' .agents/runs/POLICY/RUN.yaml | head -1 | tr -d '"')"
+    } > .agents/runs/POLICY/worker-evidence/GREEN-orchestrator-forged.yaml
+    if ./scripts/agent.sh verify-worker-evidence POLICY; then
+      echo "FAIL: orchestrator-authored (role=full_lifecycle) evidence counted under orchestrated topology" >&2; exit 1
+    fi
+    rm .agents/runs/POLICY/worker-evidence/GREEN-orchestrator-forged.yaml
 
     # GREEN with result=fail is invalid; RED with result=pass is invalid;
     # RED with a generic/too-short expected_failure is invalid.
@@ -833,7 +906,7 @@ policy_test() {
     printf '# Task: POLICY2\n' > .agents/runs/POLICY2/TASK.md; printf '# Evidence\n' > .agents/runs/POLICY2/EVIDENCE.md
     printf '%s\n' '---' 'scope:' '  - path: impl.txt' '    criteria: [AC-1]' '---' '# Plan' > .agents/runs/POLICY2/PLAN.md
     printf '%s\n' 'repository:' '  base_sha: PENDING' 'task_source:' '  type: local_markdown' '  path: tasks/POLICY.md' '  revision: PENDING' \
-      'execution:' '  mode: deterministic' '  profile: core' '  state: PLANNING' '  knowledge_state: not_started' \
+      'execution:' '  mode: deterministic' '  profile: core' '  state: PLANNING' '  knowledge_state: not_started' '  topology: orchestrated' \
       'freeze:' '  task_sha256: PENDING' '  evidence_sha256: PENDING' '  plan_sha256: PENDING' '  policy_sha256: PENDING' \
       'baseline:' '  status: pending' \
       'handoff:' '  state: PLANNED' '  verification_patch_sha256: PENDING' '  review_patch_sha256: PENDING' '  code_done_patch_sha256: PENDING' \
@@ -850,6 +923,136 @@ policy_test() {
     if ./scripts/agent.sh handoff POLICY2 VERIFIED; then echo "FAIL: cross-task evidence (wrong task_id/hashes) was accepted" >&2; exit 1; fi
     printf 'POLICY\n' > .agents/ACTIVE_RUN)
   echo 'agent policy tests passed'
+}
+
+# Proves execution.topology: standalone — the complement of policy_test's
+# orchestrated case. The generic control plane does not know or care which
+# vendor is running as full_lifecycle here; this fixture is run twice under
+# different task IDs/commentary ("Claude-like", "Codex-like") purely to make
+# that vendor-neutrality concrete rather than asserted only by absence of
+# vendor-specific code.
+standalone_test() {
+  tmp=$(mktemp -d /tmp/deterministic-standalone.XXXXXX); trap 'rm -rf "$tmp"' EXIT
+  mkdir -p "$tmp/.agents/runs/STANDALONE/review" "$tmp/.agents/modes" "$tmp/.agents/task-integrations" "$tmp/scripts" "$tmp/tasks"
+  cp "$root/scripts/agent.sh" "$root/scripts/worker-run.sh" "$tmp/scripts/"; chmod +x "$tmp/scripts/worker-run.sh"
+  cp "$root/.agents/config.yaml" "$tmp/.agents/"; cp "$root/.agents/modes/"*.yaml "$tmp/.agents/modes/"
+  cp "$root/.agents/task-integrations/markdown.sh" "$tmp/.agents/task-integrations/"; chmod +x "$tmp/.agents/task-integrations/markdown.sh"
+  printf 'STANDALONE\n' > "$tmp/.agents/ACTIVE_RUN"
+  printf '# Task: STANDALONE\n\n## Acceptance criteria\n\n- AC-1: impl.txt behavior\n- AC-2: config.txt constant\n' > "$tmp/.agents/runs/STANDALONE/TASK.md"
+  printf '# Evidence\n' > "$tmp/.agents/runs/STANDALONE/EVIDENCE.md"
+  printf '%s\n' '---' 'scope:' \
+    '  - path: impl.txt' '    criteria: [AC-1]' \
+    '  - path: config.txt' '    criteria: [AC-2]' \
+    '    tdd_exemption: "control-plane configuration constant with no executable behavior to test"' \
+    '---' '# Plan' > "$tmp/.agents/runs/STANDALONE/PLAN.md"
+  printf '%s\n' 'repository:' '  base_sha: PENDING' 'task_source:' '  type: local_markdown' '  path: tasks/STANDALONE.md' '  revision: PENDING' \
+    'execution:' '  mode: deterministic' '  profile: core' '  state: PLANNING' '  knowledge_state: not_started' '  topology: standalone' \
+    'freeze:' '  task_sha256: PENDING' '  evidence_sha256: PENDING' '  plan_sha256: PENDING' '  policy_sha256: PENDING' \
+    'baseline:' '  status: pending' \
+    'handoff:' '  state: PLANNED' '  verification_patch_sha256: PENDING' '  review_patch_sha256: PENDING' '  code_done_patch_sha256: PENDING' \
+    'worker_evidence:' '  required: true' 'tdd:' '  required: true' \
+    'completion_report:' '  required: true' '  adapter: PENDING' '  published: false' '  receipt: PENDING' \
+    > "$tmp/.agents/runs/STANDALONE/RUN.yaml"
+  printf '# review\n' > "$tmp/.agents/runs/STANDALONE/review/code-review.md"; printf '# verification\n' > "$tmp/.agents/runs/STANDALONE/review/verification.md"; printf '# result\n' > "$tmp/.agents/runs/STANDALONE/RESULT.md"
+  (cd "$tmp"; git init -q; git config user.email standalone@example.invalid; git config user.name fixture
+    printf '# STANDALONE task\n' > tasks/STANDALONE.md; : > impl.txt; : > config.txt
+    git add -- .agents scripts tasks impl.txt config.txt; git commit -qm baseline
+
+    ./scripts/agent.sh baseline STANDALONE
+    printf 'discovered\n' >> .agents/runs/STANDALONE/EVIDENCE.md
+    printf 'planned\n' >> .agents/runs/STANDALONE/PLAN.md
+    ./scripts/agent.sh freeze STANDALONE
+    ./scripts/agent.sh handoff STANDALONE IMPLEMENTING
+
+    # Under standalone topology, implementation_worker is not the expected
+    # owner — the role that would be correct under orchestrated is now the
+    # wrong one, symmetrically to policy_test's forged-evidence case.
+    if printf 'command: go test ./...\ntarget: impl.txt\nexpected_failure: TestImpl fails: no such method yet\n' \
+       | AGENT_ROLE=implementation_worker ./scripts/agent.sh worker-evidence STANDALONE RED fail; then
+      echo "FAIL: implementation_worker was allowed to record evidence under standalone topology" >&2; exit 1
+    fi
+
+    # worker-run.sh itself refuses to run at all against a standalone-topology
+    # run (checked before even looking for a codex binary, so this needs no
+    # real codex install to verify).
+    if ./scripts/worker-run.sh STANDALONE RED --network not-required --prompt-file .agents/runs/STANDALONE/TASK.md; then
+      echo "FAIL: worker-run.sh proceeded against a standalone-topology run" >&2; exit 1
+    fi
+
+    # (1) Standalone full_lifecycle implements the change directly — this is
+    # correct and expected here, unlike policy_test's orchestrated case.
+    printf 'implemented directly by the standalone full_lifecycle agent\n' > impl.txt
+
+    # (4) Standalone must not use "no worker exists" as an excuse to skip
+    # RED/GREEN: VERIFIED is still rejected with zero evidence recorded.
+    if ./scripts/agent.sh handoff STANDALONE VERIFIED; then
+      echo "FAIL: standalone VERIFIED succeeded with no RED/GREEN evidence at all" >&2; exit 1
+    fi
+
+    # (2) Valid RED, attributable to full_lifecycle (the default role — no
+    # AGENT_ROLE override), is required and accepted.
+    printf 'command: go test ./... -run TestImpl\ntarget: impl.txt\nexpected_failure: TestImpl fails: registry returns zero tasks before the new lookup method exists\n' \
+      | ./scripts/agent.sh worker-evidence STANDALONE RED fail
+    if ./scripts/agent.sh handoff STANDALONE VERIFIED; then
+      echo "FAIL: standalone VERIFIED succeeded with RED but no GREEN evidence" >&2; exit 1
+    fi
+
+    # (3) Valid GREEN, same role, completes the pair; config.txt's exemption
+    # covers the other scope path exactly as under orchestrated topology.
+    printf 'command: go test ./... -run TestImpl\ntarget: impl.txt\n' \
+      | ./scripts/agent.sh worker-evidence STANDALONE GREEN pass
+    grep -Fq 'role: "full_lifecycle"' .agents/runs/STANDALONE/worker-evidence/RED-1.yaml
+    grep -Fq 'role: "full_lifecycle"' .agents/runs/STANDALONE/worker-evidence/GREEN-1.yaml
+    ./scripts/agent.sh handoff STANDALONE VERIFIED
+    ./scripts/agent.sh handoff STANDALONE REVIEWED
+    ./scripts/agent.sh handoff STANDALONE CODE_DONE
+
+    # (14) Completion-report/DONE gating is identical in standalone mode.
+    if ./scripts/agent.sh handoff STANDALONE DONE; then echo "FAIL: DONE allowed before completion report" >&2; exit 1; fi
+    printf '%s\n' '# Completion Report: STANDALONE' '' '## Implementation Summary' 'impl.txt gained Find(); config.txt is a constant, TDD-exempt.' '' \
+      '## TDD Evidence' 'RED: TestImpl failed for the expected reason; GREEN: passed after implementation. Both authored by the standalone full_lifecycle agent.' '' \
+      '## Verification' 'go test ./... passed.' '' '## Review Result' 'Approved.' '' '## Known Limitations / Follow-up' 'None.' \
+      > .agents/runs/STANDALONE/COMPLETION_REPORT.md
+    ./scripts/agent.sh publish-completion-report STANDALONE markdown
+    ./scripts/agent.sh knowledge-done STANDALONE not_applicable
+    ./scripts/agent.sh verify-completion-report STANDALONE
+    ./scripts/agent.sh handoff STANDALONE DONE)
+
+  # (5, 6) The same mechanism, run again under a differently-labeled task,
+  # accepts a second standalone full_lifecycle "identity" with zero
+  # vendor-specific code anywhere in agent.sh — the control plane never
+  # branches on Claude vs. Codex, only on execution_role/topology.
+  tmp2=$(mktemp -d /tmp/deterministic-standalone2.XXXXXX)
+  mkdir -p "$tmp2/.agents/runs/STANDALONE2/review" "$tmp2/.agents/modes" "$tmp2/scripts" "$tmp2/tasks"
+  cp "$root/scripts/agent.sh" "$tmp2/scripts/"; cp "$root/.agents/config.yaml" "$tmp2/.agents/"; cp "$root/.agents/modes/"*.yaml "$tmp2/.agents/modes/"
+  printf 'STANDALONE2\n' > "$tmp2/.agents/ACTIVE_RUN"
+  printf '# Task: STANDALONE2 (simulating a standalone Codex-like session)\n' > "$tmp2/.agents/runs/STANDALONE2/TASK.md"
+  printf '# Evidence\n' > "$tmp2/.agents/runs/STANDALONE2/EVIDENCE.md"
+  printf '%s\n' '---' 'scope:' '  - path: impl.txt' '    criteria: [AC-1]' '---' '# Plan' > "$tmp2/.agents/runs/STANDALONE2/PLAN.md"
+  printf '%s\n' 'repository:' '  base_sha: PENDING' 'task_source:' '  type: local_markdown' '  path: tasks/STANDALONE2.md' '  revision: PENDING' \
+    'execution:' '  mode: deterministic' '  profile: core' '  state: PLANNING' '  knowledge_state: not_started' '  topology: standalone' \
+    'freeze:' '  task_sha256: PENDING' '  evidence_sha256: PENDING' '  plan_sha256: PENDING' '  policy_sha256: PENDING' \
+    'baseline:' '  status: pending' \
+    'handoff:' '  state: PLANNED' '  verification_patch_sha256: PENDING' '  review_patch_sha256: PENDING' '  code_done_patch_sha256: PENDING' \
+    'worker_evidence:' '  required: true' 'tdd:' '  required: true' \
+    'completion_report:' '  required: true' '  adapter: PENDING' '  published: false' '  receipt: PENDING' \
+    > "$tmp2/.agents/runs/STANDALONE2/RUN.yaml"
+  printf '# review\n' > "$tmp2/.agents/runs/STANDALONE2/review/code-review.md"; printf '# verification\n' > "$tmp2/.agents/runs/STANDALONE2/review/verification.md"; printf '# result\n' > "$tmp2/.agents/runs/STANDALONE2/RESULT.md"
+  (cd "$tmp2"; git init -q; git config user.email standalone2@example.invalid; git config user.name fixture
+    printf '# STANDALONE2 task\n' > tasks/STANDALONE2.md; : > impl.txt
+    git add -- .agents scripts tasks impl.txt; git commit -qm baseline
+    ./scripts/agent.sh baseline STANDALONE2
+    printf 'discovered\n' >> .agents/runs/STANDALONE2/EVIDENCE.md
+    printf 'planned\n' >> .agents/runs/STANDALONE2/PLAN.md
+    ./scripts/agent.sh freeze STANDALONE2
+    ./scripts/agent.sh handoff STANDALONE2 IMPLEMENTING
+    printf 'implemented directly by a second, differently-identified standalone agent\n' > impl.txt
+    printf 'command: go test ./...\ntarget: impl.txt\nexpected_failure: TestImpl fails: lookup not implemented yet\n' \
+      | ./scripts/agent.sh worker-evidence STANDALONE2 RED fail
+    printf 'command: go test ./...\ntarget: impl.txt\n' | ./scripts/agent.sh worker-evidence STANDALONE2 GREEN pass
+    ./scripts/agent.sh handoff STANDALONE2 VERIFIED)
+  rm -rf "$tmp2"
+  echo 'agent standalone tests passed'
 }
 
 # Deterministic per-task branch isolation. A run whose RUN.yaml has no repository.task_branch
@@ -938,7 +1141,7 @@ command=${1:-}; case "$command" in
   publish-completion-report) publish_completion_report "${2:?usage: $0 publish-completion-report <TASK-ID> [ADAPTER]}" "${3:-markdown}" ;;
   verify-completion-report) verify_completion_report "${2:?usage: $0 verify-completion-report <TASK-ID>}" ;;
   validate) id=${2:?usage: $0 validate <TASK-ID>}; require_run "$id"; dir=$(run_dir "$id"); for f in TASK.md EVIDENCE.md PLAN.md RUN.yaml review/code-review.md review/verification.md RESULT.md; do [ -f "$dir/$f" ] || fail "missing required artifact: $f"; done; if section_key_present "$dir" completion_report required; then [ -f "$dir/COMPLETION_REPORT.md" ] || fail "missing required artifact: COMPLETION_REPORT.md"; fi; validate_control_artifacts "$id"; scope_mappings "$dir/PLAN.md" >/dev/null; status=$(baseline_status "$dir"); if [ "$status" = captured ]; then validate_captured_baseline "$dir"; else historical_reference "$id" || fail "baseline missing or pending: $id"; fi; verify_freshness "$id"; verify_handoff "$id"; echo "run validated: $id" ;;
-  test) require_full_lifecycle; fixture_test; branch_test; policy_test ;;
+  test) require_full_lifecycle; fixture_test; branch_test; policy_test; standalone_test ;;
   role-test) require_full_lifecycle; role_test ;;
   *) echo "usage: $0 {role|status|effective|baseline|branch|freeze|refreeze|verify-freeze|freshness|handoff|verify-handoff|delivery-check|worker-evidence|verify-worker-evidence|knowledge-done|publish-completion-report|verify-completion-report|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
 esac

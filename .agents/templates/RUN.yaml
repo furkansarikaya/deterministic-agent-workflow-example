@@ -18,6 +18,9 @@ execution:
   profile: core
   state: PLANNING
   knowledge_state: not_started
+  # standalone | orchestrated, or PENDING to inherit .agents/config.yaml's
+  # default_topology. See .agents/WORKFLOW.md's "Execution topology".
+  topology: PENDING
 
 baseline:
   status: pending

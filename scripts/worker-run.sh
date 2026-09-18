@@ -1,14 +1,19 @@
 #!/bin/sh
-# Canonical Claude -> Codex implementation_worker invocation path.
+# Canonical implementation_worker invocation path — this repository's Codex
+# adapter for `orchestrated` execution topology (see .agents/WORKFLOW.md's
+# "Execution topology" section). It has no reason to run at all against a
+# run whose resolved topology is `standalone`: that topology's full_lifecycle
+# agent implements its own RED/GREEN evidence directly, never via a worker.
 #
-# This is the ONLY sanctioned way to run implementation_worker: it shells
-# out to the real `codex exec` CLI (the same binary/mechanism that actually
-# performed KW-001's IMPLEMENT phase in the KnowWeave sibling repository —
-# see the network-sandbox lesson encoded below) with AGENT_ROLE=
-# implementation_worker set for that subprocess only. It never falls back to
-# doing the implementation itself: a missing `codex` binary, a non-zero
-# exit, or no output is a hard failure, and the caller (a full_lifecycle
-# session) must not treat that as license to implement the change directly.
+# This is the ONLY sanctioned way to run implementation_worker under
+# orchestrated topology: it shells out to the real `codex exec` CLI (the
+# same binary/mechanism that actually performed KW-001's IMPLEMENT phase in
+# the KnowWeave sibling repository — see the network-sandbox lesson encoded
+# below) with AGENT_ROLE=implementation_worker set for that subprocess only.
+# It never falls back to doing the implementation itself: a missing `codex`
+# binary, a non-zero exit, or no output is a hard failure, and the caller (a
+# full_lifecycle orchestrator) must not treat that as license to implement
+# the change directly.
 #
 # Model/reasoning-effort selection is deliberately NOT pinned here: unless
 # --model/--effort is explicitly passed, `codex exec` resolves both from the
@@ -35,10 +40,29 @@ case "$phase" in RED|GREEN|REFACTOR|FIX) ;; *) echo "invalid phase: $phase (want
 case "$network" in required|not-required) ;; *) echo "--network must be 'required' or 'not-required' (declare it from EVIDENCE.md, don't guess)" >&2; exit 2 ;; esac
 [ -n "$prompt_file" ] && [ -f "$prompt_file" ] || usage
 
-command -v codex >/dev/null 2>&1 || { echo "worker-run: codex CLI not found on PATH; refusing to fall back to self-implementation" >&2; exit 1; }
-
 dir="$root/.agents/runs/$task_id"
 [ -d "$dir" ] || { echo "worker-run: no such run: $task_id" >&2; exit 1; }
+
+# Checked before even looking for the codex binary: this is a more
+# fundamental precondition ("does this run want a worker at all?") than
+# tooling availability, and should fail with a clear semantic reason rather
+# than a misleading "codex not found" in an environment that simply never
+# needed codex for a standalone-topology run. Same resolution order as
+# agent.sh's resolve_topology: RUN.yaml wins over .agents/config.yaml's
+# default_topology; neither being valid is a hard failure, never a guess.
+topology=$(sed -n '/^execution:$/,/^[^ ]/p' "$dir/RUN.yaml" | sed -n 's/^[[:space:]]*topology: *//p' | head -1 | tr -d '"')
+case "$topology" in
+  standalone|orchestrated) ;;
+  *) topology=$(sed -n 's/^default_topology: *//p' "$root/.agents/config.yaml" | head -1 | tr -d '"') ;;
+esac
+case "$topology" in
+  orchestrated) ;;
+  standalone) echo "worker-run: run $task_id resolves to standalone execution topology; this run's full_lifecycle agent implements RED/GREEN itself and must not invoke worker-run.sh" >&2; exit 1 ;;
+  *) echo "worker-run: could not resolve a valid execution topology for $task_id (set execution.topology or .agents/config.yaml's default_topology)" >&2; exit 1 ;;
+esac
+
+command -v codex >/dev/null 2>&1 || { echo "worker-run: codex CLI not found on PATH; refusing to fall back to self-implementation" >&2; exit 1; }
+
 state=$(sed -n '/^handoff:$/,/^[^ ]/p' "$dir/RUN.yaml" | sed -n 's/^[[:space:]]*state: *//p' | head -1 | tr -d '"')
 [ "$state" = IMPLEMENTING ] || { echo "worker-run: run $task_id is not in IMPLEMENTING (state: $state); establish that handoff first" >&2; exit 1; }
 
