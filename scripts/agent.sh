@@ -196,6 +196,22 @@ scope_mappings() {
   ' "$1"
 }
 authorized_path() { printf '%s\n' "$1" | cut -d '|' -f1 | grep -Fxq "$2"; }
+
+# The Transaction B (knowledge transaction) scope boundary — see
+# .agents/config.yaml's `knowledge_scope_root`. Deliberately a single
+# explicit directory-prefix allowlist, never "anything verify_scope doesn't
+# otherwise recognize" — an unset/empty root means nothing is in knowledge
+# scope (fails closed to the pre-existing, stricter behavior), not "allow
+# everything".
+knowledge_scope_root() { config_value knowledge_scope_root "$config"; }
+in_knowledge_scope() {
+  # NOTE: must not name this local var "root" — this script has no `local`
+  # (POSIX sh) and the top-level `root` (repository root path) is used
+  # everywhere via plain assignment; shadowing it here previously corrupted
+  # every subsequent path computation for the rest of the process.
+  kroot=$(knowledge_scope_root); [ -n "$kroot" ] || return 1
+  case "$1" in "$kroot"*) return 0 ;; *) return 1 ;; esac
+}
 task_owned_paths() {
   id=$1; dir=$(run_dir "$id"); mappings=$(scope_mappings "$dir/PLAN.md") || return 1
   for type in tracked untracked; do
@@ -215,8 +231,13 @@ task_patch_fingerprint() {
 record_handoff() {
   id=$1 phase=$2; require_run "$id"; dir=$(run_dir "$id")
   enforce_task_branch "$id"
-  verify_freshness "$id"; verify_scope "$id"
   case "$phase" in IMPLEMENTING|VERIFIED|REVIEWED|CODE_DONE|DONE) ;; *) fail "invalid handoff phase";; esac
+  # Only the DONE transition may legitimately see knowledge-scope (Transaction
+  # B) diffs — every earlier phase keeps strict application-only scope
+  # checking, so a wiki write attempted during DISCOVER/PLAN/IMPLEMENT/
+  # VERIFY/REVIEW is still rejected exactly as before this existed.
+  allow_knowledge=0; [ "$phase" = DONE ] && allow_knowledge=1
+  verify_freshness "$id"; verify_scope "$id" "$allow_knowledge"
   patch=$(task_patch_fingerprint "$id")
   current=$(section_value "$dir" handoff state)
   case "$phase" in
@@ -251,7 +272,14 @@ record_handoff() {
       replace_section_value "$dir" handoff code_done_patch_sha256 "$patch" "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml" ;;
     DONE)
       case "$current" in CODE_DONE|DONE) ;; *) fail "illegal handoff transition: $current -> $phase";; esac
+      # Application scope integrity: task_patch_fingerprint/task_owned_paths
+      # (unchanged by this fix) never include a knowledge-scope path in the
+      # first place, so this check is exactly as strict as it always was —
+      # a wiki write cannot move or hide an application-scope violation.
       [ "$(section_value "$dir" handoff code_done_patch_sha256)" = "$patch" ] || fail "DONE blocked: CODE_DONE stale or missing"
+      # Knowledge transaction integrity: the Transaction B counterpart to the
+      # application-scope check above — see verify_knowledge_scope.
+      verify_knowledge_scope "$id"
       section_key_present "$dir" completion_report required && {
         ks=$(section_value "$dir" execution knowledge_state)
         case "$ks" in KNOWLEDGE_DONE|not_applicable) ;; *) fail "DONE blocked: knowledge transaction not recorded complete (see 'agent.sh knowledge-done')" ;; esac
@@ -441,9 +469,19 @@ record_worker_evidence() {
   else
     [ "$result" = pass ] || { rm -f "$scratch"; fail "$phase evidence must record result: pass"; }
   fi
-  evdir=$(worker_evidence_dir "$id"); mkdir -p "$evdir"
+  evdir=$(worker_evidence_dir "$id")
+  mkdir -p "$evdir" || { rm -f "$scratch"; fail "worker evidence directory could not be created (sandbox denied write?): $evdir"; }
   seq=$(next_evidence_seq "$evdir" "$phase")
   out="$evdir/$phase-$seq.yaml"
+  # Fail closed, not silently: on some sandboxes (notably `codex exec
+  # --sandbox workspace-write` without the run's worker-evidence directory
+  # explicitly added via --add-dir — see scripts/worker-run.sh) this
+  # redirect can fail with EPERM while the rest of the script continues, so
+  # a missing/short/unreadable result here must abort loudly rather than
+  # print a false "recorded" message — this exact failure mode was observed
+  # in a real Codex `implementation_worker` invocation (see
+  # .agents/WORKFLOW.md's "Worker evidence and the sandbox boundary"
+  # section).
   {
     printf 'task_id: "%s"\n' "$id"
     printf 'phase: "%s"\n' "$phase"
@@ -459,8 +497,10 @@ record_worker_evidence() {
     printf 'plan_sha256: "%s"\n' "$(section_value "$dir" freeze plan_sha256)"
     [ -n "${CODEX_SESSION_ID:-}" ] && printf 'codex_session_id: "%s"\n' "$CODEX_SESSION_ID"
     printf 'timestamp: "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  } > "$out"
-  rm -f "$scratch"
+  } > "$out" 2>"$scratch.writeerr" || { we=$(cat "$scratch.writeerr" 2>/dev/null || true); rm -f "$scratch" "$scratch.writeerr" "$out" 2>/dev/null || true; fail "failed to write worker evidence file (sandbox denied write?): $out${we:+ ($we)}"; }
+  rm -f "$scratch" "$scratch.writeerr"
+  [ -s "$out" ] || { rm -f "$out"; fail "worker evidence file was not actually written (empty or missing after redirect): $out"; }
+  grep -q '^task_id: ' "$out" || { rm -f "$out"; fail "worker evidence file is malformed (missing task_id): $out"; }
   echo "worker evidence recorded: $id $phase-$seq ($result)"
 }
 
@@ -641,21 +681,70 @@ validate_captured_baseline() {
   ' "$dir/RUN.yaml" || fail "invalid captured baseline entries"
 }
 
+# $2 (default: 0/strict) — when 1, a path under `knowledge_scope_root` is
+# treated as out of *application* scope (neither pass nor fail here) instead
+# of "unexpected", and is deferred entirely to `verify_knowledge_scope`. This
+# is only ever passed as 1 for the DONE handoff transition (see
+# record_handoff) — every other caller (the `verify-scope` CLI command,
+# `delivery_check`, `verify_handoff`, and every pre-DONE handoff phase) keeps
+# the original strict behavior unchanged, so a knowledge-scope write attempted
+# before CODE_DONE is still flagged exactly as before this option existed.
 verify_scope() {
-  id=$1; require_run "$id"; dir=$(run_dir "$id"); enforce_task_branch "$id"; mappings=$(scope_mappings "$dir/PLAN.md") || fail "invalid scope mapping"; [ -n "$mappings" ] || fail "scope mapping missing"
+  id=$1 allow_knowledge=${2:-0}; require_run "$id"; dir=$(run_dir "$id"); enforce_task_branch "$id"; mappings=$(scope_mappings "$dir/PLAN.md") || fail "invalid scope mapping"; [ -n "$mappings" ] || fail "scope mapping missing"
   status=$(baseline_status "$dir"); [ "$status" = captured ] || { historical_reference "$id" && fail "scope verification unavailable for historical reference: $id"; fail "baseline required before scope verification: $id"; }
   tmp=$(mktemp "${TMPDIR:-/tmp}/agent-scope.XXXXXX")
   for type in tracked untracked; do
     paths=$( [ "$type" = tracked ] && current_tracked_paths || current_untracked_paths )
     printf '%s\n' "$paths" | while IFS= read -r changed; do
-      [ -n "$changed" ] || continue; prior=$(baseline_fingerprint "$type" "$changed" "$dir"); current=$(fingerprint_path "$changed")
+      [ -n "$changed" ] || continue
       known_control_artifact "$id" "$changed" && continue
+      if [ "$allow_knowledge" = 1 ] && in_knowledge_scope "$changed"; then continue; fi
+      prior=$(baseline_fingerprint "$type" "$changed" "$dir"); current=$(fingerprint_path "$changed")
       if [ -n "$prior" ] && [ "$prior" = "$current" ]; then continue; fi
       authorized_path "$mappings" "$changed" || printf '%s\n' "$changed" >> "$tmp"
     done
   done
   unexpected=$(cat "$tmp"); rm "$tmp"
   [ -z "$unexpected" ] || { echo "unexpected or unmapped task-introduced paths:" >&2; printf '%s\n' "$unexpected" >&2; return 1; }; echo "scope check passed: $id"
+}
+
+# The Transaction B counterpart to verify_scope: validates every changed path
+# that *is* under `knowledge_scope_root`, independently of application scope.
+# A knowledge-scope diff is only legitimate when `execution.knowledge_state`
+# is recorded `KNOWLEDGE_DONE` (real writes happened and the transaction was
+# closed out) or the diff set is empty while it is `not_applicable` (no writes
+# were needed and none happened) — every other combination fails closed:
+# diffs present without a recorded-complete transaction, or a transaction
+# claimed complete with zero diffs to show for it (`not_applicable` is the
+# correct value for that case, not `KNOWLEDGE_DONE`).
+verify_knowledge_scope() {
+  id=$1; require_run "$id"; dir=$(run_dir "$id")
+  status=$(baseline_status "$dir"); [ "$status" = captured ] || { historical_reference "$id" && fail "knowledge-scope verification unavailable for historical reference: $id"; fail "baseline required before knowledge-scope verification: $id"; }
+  tmp=$(mktemp "${TMPDIR:-/tmp}/agent-knowledge-scope.XXXXXX")
+  for type in tracked untracked; do
+    paths=$( [ "$type" = tracked ] && current_tracked_paths || current_untracked_paths )
+    printf '%s\n' "$paths" | while IFS= read -r changed; do
+      [ -n "$changed" ] || continue
+      known_control_artifact "$id" "$changed" && continue
+      in_knowledge_scope "$changed" || continue
+      prior=$(baseline_fingerprint "$type" "$changed" "$dir"); current=$(fingerprint_path "$changed")
+      if [ -n "$prior" ] && [ "$prior" = "$current" ]; then continue; fi
+      printf '%s\n' "$changed" >> "$tmp"
+    done
+  done
+  owned=$(cat "$tmp"); rm -f "$tmp"
+  ks=$(section_value "$dir" execution knowledge_state)
+  if [ -n "$owned" ]; then
+    case "$ks" in
+      KNOWLEDGE_DONE) ;;
+      *) echo "knowledge-scope changes present but knowledge transaction not recorded complete (knowledge_state=$ks); run 'agent.sh knowledge-done' first, or these paths are unauthorized:" >&2; printf '%s\n' "$owned" >&2; return 1 ;;
+    esac
+  else
+    case "$ks" in
+      KNOWLEDGE_DONE) fail "knowledge_state is KNOWLEDGE_DONE but no knowledge-scope changes were found under $(knowledge_scope_root) — record 'not_applicable' instead if no writes were needed" ;;
+    esac
+  fi
+  echo "knowledge scope verified: $id"
 }
 
 freeze() {
@@ -925,6 +1014,152 @@ policy_test() {
   echo 'agent policy tests passed'
 }
 
+# Regression test for a real observed worker-evidence sandbox failure: `codex
+# exec --sandbox workspace-write` denied writes under the run's own
+# `.agents/runs/<ID>/worker-evidence/` directory, and record_worker_evidence
+# printed a false "recorded" success message instead of failing closed.
+# Permissions simulate the same denied-write effect deterministically,
+# without depending on a real sandboxed `codex` subprocess.
+worker_evidence_write_failure_test() {
+  tmp=$(mktemp -d /tmp/deterministic-writefail.XXXXXX); trap 'chmod -R u+w "$tmp" 2>/dev/null; rm -rf "$tmp"' EXIT
+  mkdir -p "$tmp/.agents/runs/WRITEFAIL/review" "$tmp/.agents/modes" "$tmp/scripts" "$tmp/tasks"
+  cp "$root/scripts/agent.sh" "$tmp/scripts/"; cp "$root/.agents/config.yaml" "$tmp/.agents/"; cp "$root/.agents/modes/"*.yaml "$tmp/.agents/modes/"
+  printf 'WRITEFAIL\n' > "$tmp/.agents/ACTIVE_RUN"
+  printf '# Task: WRITEFAIL\n' > "$tmp/.agents/runs/WRITEFAIL/TASK.md"
+  printf '# Evidence\n' > "$tmp/.agents/runs/WRITEFAIL/EVIDENCE.md"
+  printf '%s\n' '---' 'scope:' '  - path: impl.txt' '    criteria: [AC-1]' '---' '# Plan' > "$tmp/.agents/runs/WRITEFAIL/PLAN.md"
+  printf '%s\n' 'repository:' '  base_sha: PENDING' 'task_source:' '  type: local_markdown' '  path: tasks/WRITEFAIL.md' '  revision: PENDING' \
+    'execution:' '  mode: deterministic' '  profile: core' '  state: PLANNING' '  knowledge_state: not_started' '  topology: orchestrated' \
+    'freeze:' '  task_sha256: PENDING' '  evidence_sha256: PENDING' '  plan_sha256: PENDING' '  policy_sha256: PENDING' \
+    'baseline:' '  status: pending' \
+    'handoff:' '  state: PLANNED' '  verification_patch_sha256: PENDING' '  review_patch_sha256: PENDING' '  code_done_patch_sha256: PENDING' \
+    'worker_evidence:' '  required: true' 'tdd:' '  required: true' \
+    'completion_report:' '  required: true' '  adapter: PENDING' '  published: false' '  receipt: PENDING' \
+    > "$tmp/.agents/runs/WRITEFAIL/RUN.yaml"
+  printf '# review\n' > "$tmp/.agents/runs/WRITEFAIL/review/code-review.md"; printf '# verification\n' > "$tmp/.agents/runs/WRITEFAIL/review/verification.md"; printf '# result\n' > "$tmp/.agents/runs/WRITEFAIL/RESULT.md"
+  (cd "$tmp"; git init -q; git config user.email writefail@example.invalid; git config user.name fixture
+    printf '# WRITEFAIL task\n' > tasks/WRITEFAIL.md; : > impl.txt
+    git add -- .agents scripts tasks impl.txt; git commit -qm baseline
+    ./scripts/agent.sh baseline WRITEFAIL
+    printf 'discovered\n' >> .agents/runs/WRITEFAIL/EVIDENCE.md
+    printf 'planned\n' >> .agents/runs/WRITEFAIL/PLAN.md
+    ./scripts/agent.sh freeze WRITEFAIL
+    ./scripts/agent.sh handoff WRITEFAIL IMPLEMENTING
+
+    # The run's worker-evidence directory exists but cannot be written to —
+    # this is the deterministic stand-in for the sandbox denying the write.
+    mkdir -p .agents/runs/WRITEFAIL/worker-evidence
+    chmod 555 .agents/runs/WRITEFAIL/worker-evidence
+
+    if err_out=$(printf 'command: go test ./...\ntarget: impl.txt\nexpected_failure: TestImpl fails: lookup method does not exist yet, specifically\n' | AGENT_ROLE=implementation_worker ./scripts/agent.sh worker-evidence WRITEFAIL RED fail 2>&1); then
+      chmod 755 .agents/runs/WRITEFAIL/worker-evidence
+      echo "FAIL: worker-evidence command succeeded (exit 0) despite a denied directory write" >&2; exit 1
+    fi
+    chmod 755 .agents/runs/WRITEFAIL/worker-evidence
+    printf '%s\n' "$err_out" | grep -qi "worker evidence" || { echo "FAIL: failure message did not mention worker evidence: $err_out" >&2; exit 1; }
+    printf '%s\n' "$err_out" | grep -qi "recorded" && { echo "FAIL: a denied write must not print a success-sounding 'recorded' message: $err_out" >&2; exit 1; }
+    [ -z "$(ls -A .agents/runs/WRITEFAIL/worker-evidence 2>/dev/null)" ] || { echo "FAIL: a partial/empty evidence file was left behind after a denied write" >&2; exit 1; }
+
+    # Once the directory is writable again (the real fix: scripts/worker-run.sh
+    # passing --add-dir for exactly this directory), the identical command
+    # succeeds and leaves a real, non-empty, well-formed evidence file.
+    AGENT_ROLE=implementation_worker sh -c "printf 'command: go test ./...\ntarget: impl.txt\nexpected_failure: TestImpl fails: lookup method does not exist yet, specifically\n' | ./scripts/agent.sh worker-evidence WRITEFAIL RED fail"
+    [ -s .agents/runs/WRITEFAIL/worker-evidence/RED-1.yaml ] || { echo "FAIL: evidence file missing/empty after a successful write" >&2; exit 1; }
+    grep -q '^task_id: "WRITEFAIL"' .agents/runs/WRITEFAIL/worker-evidence/RED-1.yaml || { echo "FAIL: evidence file content malformed" >&2; exit 1; })
+  echo 'agent worker-evidence write-failure tests passed'
+}
+
+# Regression test for a real observed DONE-transition bug: a legitimate
+# Transaction B (knowledge transaction) write under docs/wiki/** was rejected by DONE's
+# scope check as an "unexpected or unmapped task-introduced path", because
+# verify_scope only ever recognized PLAN.md's frozen application scope.
+# Proves: (1) a knowledge-scope diff without a recorded-complete knowledge
+# transaction still fails closed; (2) an application-scope violation is still
+# rejected at DONE regardless of knowledge-scope state (no loophole); (3) a
+# knowledge-scope diff with knowledge_state=not_applicable (mismatched) still
+# fails closed; (4) a genuine knowledge-scope diff with knowledge_state=
+# KNOWLEDGE_DONE now legitimately reaches DONE; (5) knowledge_state=
+# KNOWLEDGE_DONE with zero actual knowledge-scope diffs fails closed
+# (prevents the value being rubber-stamped without real writes).
+knowledge_scope_test() {
+  tmp=$(mktemp -d /tmp/deterministic-knowscope.XXXXXX); trap 'rm -rf "$tmp"' EXIT
+  mkdir -p "$tmp/.agents/runs/KNOWSCOPE/review" "$tmp/.agents/modes" "$tmp/.agents/task-integrations" "$tmp/scripts" "$tmp/tasks" "$tmp/docs/wiki"
+  cp "$root/scripts/agent.sh" "$tmp/scripts/"; cp "$root/.agents/config.yaml" "$tmp/.agents/"; cp "$root/.agents/modes/"*.yaml "$tmp/.agents/modes/"
+  cp "$root/.agents/task-integrations/markdown.sh" "$tmp/.agents/task-integrations/"; chmod +x "$tmp/.agents/task-integrations/markdown.sh"
+  printf 'KNOWSCOPE\n' > "$tmp/.agents/ACTIVE_RUN"
+  printf '# Task: KNOWSCOPE\n' > "$tmp/.agents/runs/KNOWSCOPE/TASK.md"
+  printf '# Evidence\n' > "$tmp/.agents/runs/KNOWSCOPE/EVIDENCE.md"
+  printf '%s\n' '---' 'scope:' '  - path: impl.txt' '    criteria: [AC-1]' '---' '# Plan' > "$tmp/.agents/runs/KNOWSCOPE/PLAN.md"
+  printf '%s\n' 'repository:' '  base_sha: PENDING' 'task_source:' '  type: local_markdown' '  path: tasks/KNOWSCOPE.md' '  revision: PENDING' \
+    'execution:' '  mode: deterministic' '  profile: core' '  state: PLANNING' '  knowledge_state: not_started' '  topology: orchestrated' \
+    'freeze:' '  task_sha256: PENDING' '  evidence_sha256: PENDING' '  plan_sha256: PENDING' '  policy_sha256: PENDING' \
+    'baseline:' '  status: pending' \
+    'handoff:' '  state: PLANNED' '  verification_patch_sha256: PENDING' '  review_patch_sha256: PENDING' '  code_done_patch_sha256: PENDING' \
+    'worker_evidence:' '  required: true' 'tdd:' '  required: true' \
+    'completion_report:' '  required: true' '  adapter: PENDING' '  published: false' '  receipt: PENDING' \
+    > "$tmp/.agents/runs/KNOWSCOPE/RUN.yaml"
+  printf '# review\n' > "$tmp/.agents/runs/KNOWSCOPE/review/code-review.md"; printf '# verification\n' > "$tmp/.agents/runs/KNOWSCOPE/review/verification.md"; printf '# result\n' > "$tmp/.agents/runs/KNOWSCOPE/RESULT.md"
+  (cd "$tmp"; git init -q; git config user.email knowscope@example.invalid; git config user.name fixture
+    printf '# KNOWSCOPE task\n' > tasks/KNOWSCOPE.md; : > impl.txt; printf '# Wiki index\n' > docs/wiki/index.md
+    git add -- .agents scripts tasks impl.txt docs/wiki; git commit -qm baseline
+
+    ./scripts/agent.sh baseline KNOWSCOPE
+    printf 'discovered\n' >> .agents/runs/KNOWSCOPE/EVIDENCE.md
+    printf 'planned\n' >> .agents/runs/KNOWSCOPE/PLAN.md
+    ./scripts/agent.sh freeze KNOWSCOPE
+    ./scripts/agent.sh handoff KNOWSCOPE IMPLEMENTING
+    AGENT_ROLE=implementation_worker sh -c "printf 'command: go test ./...\ntarget: impl.txt\nexpected_failure: TestImpl fails: Find() does not exist yet, specifically\n' | ./scripts/agent.sh worker-evidence KNOWSCOPE RED fail"
+    printf 'implemented\n' > impl.txt
+    AGENT_ROLE=implementation_worker sh -c "printf 'command: go test ./...\ntarget: impl.txt\n' | ./scripts/agent.sh worker-evidence KNOWSCOPE GREEN pass"
+    ./scripts/agent.sh handoff KNOWSCOPE VERIFIED
+    ./scripts/agent.sh handoff KNOWSCOPE REVIEWED
+    ./scripts/agent.sh handoff KNOWSCOPE CODE_DONE
+
+    # (1) A real application-scope violation is still rejected at DONE, with
+    # zero knowledge-scope diffs in the picture at all — the knowledge-scope
+    # mechanism does not relax application-scope enforcement.
+    printf 'rogue application edit\n' > rogue.txt
+    if ./scripts/agent.sh handoff KNOWSCOPE DONE; then echo "FAIL: an unmapped application-scope path was accepted at DONE" >&2; exit 1; fi
+    rm -f rogue.txt
+
+    # (2) A knowledge-scope (docs/wiki/**) diff with no recorded-complete
+    # knowledge transaction still fails closed — this is the exact shape of
+    # writing to the vault without ever calling `knowledge-done`.
+    printf '# Lesson\n' > docs/wiki/lesson.md
+    if ./scripts/agent.sh handoff KNOWSCOPE DONE; then echo "FAIL: a knowledge-scope diff was accepted at DONE without a recorded knowledge transaction" >&2; exit 1; fi
+
+    # (3) Recording the knowledge transaction as `not_applicable` while a
+    # real knowledge-scope diff exists is a mismatch, not a bypass — still
+    # rejected. `not_applicable` must mean "no writes happened", not "any
+    # writes are pre-approved".
+    ./scripts/agent.sh knowledge-done KNOWSCOPE not_applicable
+    if ./scripts/agent.sh handoff KNOWSCOPE DONE; then echo "FAIL: knowledge_state=not_applicable was accepted despite a real knowledge-scope diff" >&2; exit 1; fi
+
+    # (4) The corrected, legitimate case: the knowledge transaction actually
+    # happened and is recorded KNOWLEDGE_DONE — this is the real bug scenario
+    # this test reproduces. verify-knowledge-scope reports success directly, and DONE
+    # (once the completion report is published/verified, matching every
+    # other run's DONE gate) now legitimately succeeds.
+    ./scripts/agent.sh knowledge-done KNOWSCOPE KNOWLEDGE_DONE
+    ./scripts/agent.sh verify-knowledge-scope KNOWSCOPE
+    printf '%s\n' '# Completion Report: KNOWSCOPE' '' '## Implementation Summary' 'impl.txt gained Find().' '' \
+      '## TDD Evidence' 'RED failed for the expected reason; GREEN passed.' '' '## Verification' 'go test ./... passed.' '' \
+      '## Review Result' 'Approved.' '' '## Known Limitations / Follow-up' 'None.' \
+      > .agents/runs/KNOWSCOPE/COMPLETION_REPORT.md
+    ./scripts/agent.sh publish-completion-report KNOWSCOPE markdown
+    ./scripts/agent.sh verify-completion-report KNOWSCOPE
+    ./scripts/agent.sh handoff KNOWSCOPE DONE
+
+    # (5) Consistency check: knowledge_state=KNOWLEDGE_DONE with zero actual
+    # knowledge-scope diffs is itself rejected — a run cannot claim the
+    # transaction happened with nothing to show for it (use `not_applicable`
+    # for that case instead). Removing the only knowledge-scope diff and
+    # re-running the (idempotent, DONE->DONE) handoff proves this.
+    rm -f docs/wiki/lesson.md
+    if ./scripts/agent.sh handoff KNOWSCOPE DONE; then echo "FAIL: knowledge_state=KNOWLEDGE_DONE with zero knowledge-scope diffs was accepted" >&2; exit 1; fi)
+  echo 'agent knowledge-scope tests passed'
+}
+
 # Proves execution.topology: standalone — the complement of policy_test's
 # orchestrated case. The generic control plane does not know or care which
 # vendor is running as full_lifecycle here; this fixture is run twice under
@@ -1131,6 +1366,7 @@ command=${1:-}; case "$command" in
   refreeze) require_full_lifecycle; freeze "${2:?usage: $0 refreeze <TASK-ID> <AMENDMENT>}" refreeze "${3:?usage: $0 refreeze <TASK-ID> <AMENDMENT>}" ;;
   verify-freeze) verify_freeze "${2:?usage: $0 verify-freeze <TASK-ID>}" ;;
   verify-scope) verify_scope "${2:?usage: $0 verify-scope <TASK-ID>}" ;;
+  verify-knowledge-scope) verify_knowledge_scope "${2:?usage: $0 verify-knowledge-scope <TASK-ID>}" ;;
   freshness) verify_freshness "${2:?usage: $0 freshness <TASK-ID>}" ;;
   handoff) [ "$execution_role" = full_lifecycle ] || [ "${3:-}" = IMPLEMENTING ] || fail "handoff phase denied for implementation_worker"; record_handoff "${2:?usage: $0 handoff <TASK-ID> <PHASE>}" "${3:?usage: $0 handoff <TASK-ID> <PHASE>}" ;;
   verify-handoff) verify_handoff "${2:?usage: $0 verify-handoff <TASK-ID>}" ;;
@@ -1141,7 +1377,7 @@ command=${1:-}; case "$command" in
   publish-completion-report) publish_completion_report "${2:?usage: $0 publish-completion-report <TASK-ID> [ADAPTER]}" "${3:-markdown}" ;;
   verify-completion-report) verify_completion_report "${2:?usage: $0 verify-completion-report <TASK-ID>}" ;;
   validate) id=${2:?usage: $0 validate <TASK-ID>}; require_run "$id"; dir=$(run_dir "$id"); for f in TASK.md EVIDENCE.md PLAN.md RUN.yaml review/code-review.md review/verification.md RESULT.md; do [ -f "$dir/$f" ] || fail "missing required artifact: $f"; done; if section_key_present "$dir" completion_report required; then [ -f "$dir/COMPLETION_REPORT.md" ] || fail "missing required artifact: COMPLETION_REPORT.md"; fi; validate_control_artifacts "$id"; scope_mappings "$dir/PLAN.md" >/dev/null; status=$(baseline_status "$dir"); if [ "$status" = captured ]; then validate_captured_baseline "$dir"; else historical_reference "$id" || fail "baseline missing or pending: $id"; fi; verify_freshness "$id"; verify_handoff "$id"; echo "run validated: $id" ;;
-  test) require_full_lifecycle; fixture_test; branch_test; policy_test; standalone_test ;;
+  test) require_full_lifecycle; fixture_test; branch_test; policy_test; standalone_test; worker_evidence_write_failure_test; knowledge_scope_test ;;
   role-test) require_full_lifecycle; role_test ;;
-  *) echo "usage: $0 {role|status|effective|baseline|branch|freeze|refreeze|verify-freeze|freshness|handoff|verify-handoff|delivery-check|worker-evidence|verify-worker-evidence|knowledge-done|publish-completion-report|verify-completion-report|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
+  *) echo "usage: $0 {role|status|effective|baseline|branch|freeze|refreeze|verify-freeze|verify-scope|verify-knowledge-scope|freshness|handoff|verify-handoff|delivery-check|worker-evidence|verify-worker-evidence|knowledge-done|publish-completion-report|verify-completion-report|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
 esac

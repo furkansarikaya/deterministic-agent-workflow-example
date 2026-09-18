@@ -78,7 +78,19 @@ log_file="$log_dir/$phase-invocation-$seq.log"
 # `codex exec` is already non-interactive/non-approval by design (no
 # --full-auto equivalent needed or offered for this subcommand); the
 # sandbox mode and its network flag are the actual controls we need.
-set -- exec --sandbox "$sandbox"
+#
+# `--add-dir "$log_dir"` is required: `codex exec --sandbox workspace-write`
+# denies writes under dot-prefixed directories (`.agents/**`) even though
+# they are inside the workdir it otherwise treats as writable (observed and
+# reproduced against a real `codex exec` invocation — see
+# .agents/WORKFLOW.md's "Worker evidence and the sandbox boundary" section).
+# `agent.sh worker-evidence` writes exactly one file, under this run's own
+# `.agents/runs/<TASK-ID>/worker-evidence/`, and nowhere else under
+# `.agents/` — so this grant is scoped to that single directory, not to
+# `.agents/**` as a whole. It never widens to TASK.md/EVIDENCE.md/PLAN.md/
+# RUN.yaml or any other run's directory: `implementation_worker` still
+# cannot write those, sandboxed or not.
+set -- exec --sandbox "$sandbox" --add-dir "$log_dir"
 [ -n "$model" ] && set -- "$@" --model "$model"
 [ -n "$effort" ] && set -- "$@" --config "model_reasoning_effort=$effort"
 set -- "$@" --config "sandbox_workspace_write.network_access=$net_flag"

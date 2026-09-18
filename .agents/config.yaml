@@ -20,6 +20,16 @@ policy_source: .agents/modes
 # Single authoritative source for the canonical integration branch. A deterministic
 # task run must never implement directly on this branch; see .agents/GIT.md.
 canonical_branch: main
+# The explicit Transaction B (knowledge transaction) scope boundary — a single
+# repository-relative directory prefix (trailing slash required). A path under
+# this root is never part of a run's frozen PLAN.md (Transaction A/application)
+# scope; it is validated separately by `agent.sh verify-knowledge-scope`, gated
+# on `execution.knowledge_state` being recorded `KNOWLEDGE_DONE`/`not_applicable`
+# (see .agents/WORKFLOW.md's "Knowledge transaction scope" section). This is a
+# deliberate allowlist, not "everything verify_scope doesn't recognize" — a path
+# outside this root is always evaluated as application scope, never as knowledge
+# scope, no matter what a run's knowledge_state says.
+knowledge_scope_root: docs/wiki/
 safety:
   destructive_git_requires_explicit_authorization: true
   external_network_requires_task_authorization: true
