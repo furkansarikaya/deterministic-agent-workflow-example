@@ -290,9 +290,13 @@ record_handoff() {
   if [ "$phase" = CODE_DONE ]; then replace_section_value "$dir" execution state CODE_DONE "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml"; fi
   echo "handoff recorded: $id $phase"
 }
+# $2 (default: 0/strict) — forwarded to verify_scope; see verify_scope's own
+# doc comment. Only delivery_check passes 1 (post-DONE delivery readiness
+# must not re-reject a knowledge transaction DONE already accepted); the
+# `verify-handoff` CLI command and every other caller keep strict/0.
 verify_handoff() {
-  id=$1; require_run "$id"; dir=$(run_dir "$id"); historical_reference "$id" && { echo "handoff historical reference: $id"; return 0; }
-  verify_scope "$id"; patch=$(task_patch_fingerprint "$id"); state=$(section_value "$dir" handoff state)
+  id=$1 allow_knowledge=${2:-0}; require_run "$id"; dir=$(run_dir "$id"); historical_reference "$id" && { echo "handoff historical reference: $id"; return 0; }
+  verify_scope "$id" "$allow_knowledge"; patch=$(task_patch_fingerprint "$id"); state=$(section_value "$dir" handoff state)
   for gate in verification review code_done; do
     recorded=$(section_value "$dir" handoff "${gate}_patch_sha256")
     case "$recorded" in ''|PENDING) continue;; esac
@@ -306,7 +310,19 @@ delivery_check() {
   [ "$(run_state "$dir")" = CODE_DONE ] || fail "delivery blocked: CODE_DONE required"
   branch=$(git -C "$root" branch --show-current); [ -n "$branch" ] || fail "delivery blocked: detached HEAD"
   enforce_task_branch "$id"
-  verify_freshness "$id"; verify_scope "$id"; verify_handoff "$id"
+  verify_freshness "$id"
+  # Application-scope integrity and knowledge-transaction integrity are
+  # independently required for delivery, exactly mirroring the DONE handoff
+  # transition (record_handoff's DONE case / .agents/WORKFLOW.md's
+  # "Knowledge transaction scope"): a legitimate knowledge transaction DONE
+  # already accepted must not become "delivery blocked" merely because this
+  # check runs afterward — but an unexpected application-scope path, or an
+  # unexpected/inconsistent knowledge-scope diff (no recorded transaction,
+  # a mismatched not_applicable, or KNOWLEDGE_DONE with zero real diffs),
+  # still fails closed exactly as it would at DONE.
+  verify_scope "$id" 1
+  verify_knowledge_scope "$id"
+  verify_handoff "$id" 1
   patch=$(task_patch_fingerprint "$id"); [ "$(section_value "$dir" handoff verification_patch_sha256)" = "$patch" ] || fail "delivery blocked: verification stale or missing"
   [ "$(section_value "$dir" handoff review_patch_sha256)" = "$patch" ] || fail "delivery blocked: review stale or missing"
   [ "$(section_value "$dir" handoff code_done_patch_sha256)" = "$patch" ] || fail "delivery blocked: CODE_DONE handoff stale or missing"
@@ -1160,6 +1176,93 @@ knowledge_scope_test() {
   echo 'agent knowledge-scope tests passed'
 }
 
+# Regression test for a real observed delivery-check bug: DONE correctly accepted
+# a legitimate knowledge transaction, but `agent.sh delivery-check` (called
+# afterward, as a real delivery attempt would) still ran the strict, knowledge-blind
+# `verify_scope`/`verify_handoff` and rejected the same already-accepted
+# `docs/wiki/**` diff as an unexpected application-scope path. Proves the full
+# real-world sequence — CODE_DONE -> KNOWLEDGE_DONE with a legitimate wiki
+# change -> DONE -> delivery-check succeeds — plus that delivery-check still
+# fails closed on an unauthorized application change and on an invalid/
+# inconsistent knowledge-transaction state, exactly like DONE does.
+delivery_check_knowledge_scope_test() {
+  tmp=$(mktemp -d /tmp/deterministic-deliveryknow.XXXXXX); trap 'rm -rf "$tmp"' EXIT
+  mkdir -p "$tmp/.agents/runs/DELIVERKNOW/review" "$tmp/.agents/modes" "$tmp/.agents/task-integrations" "$tmp/scripts" "$tmp/tasks" "$tmp/docs/wiki"
+  cp "$root/scripts/agent.sh" "$tmp/scripts/"; cp "$root/.agents/config.yaml" "$tmp/.agents/"; cp "$root/.agents/modes/"*.yaml "$tmp/.agents/modes/"
+  cp "$root/.agents/task-integrations/markdown.sh" "$tmp/.agents/task-integrations/"; chmod +x "$tmp/.agents/task-integrations/markdown.sh"
+  printf 'DELIVERKNOW\n' > "$tmp/.agents/ACTIVE_RUN"
+  printf '# Task: DELIVERKNOW\n' > "$tmp/.agents/runs/DELIVERKNOW/TASK.md"
+  printf '# Evidence\n' > "$tmp/.agents/runs/DELIVERKNOW/EVIDENCE.md"
+  printf '%s\n' '---' 'scope:' '  - path: impl.txt' '    criteria: [AC-1]' '---' '# Plan' > "$tmp/.agents/runs/DELIVERKNOW/PLAN.md"
+  printf '%s\n' 'repository:' '  base_sha: PENDING' 'task_source:' '  type: local_markdown' '  path: tasks/DELIVERKNOW.md' '  revision: PENDING' \
+    'execution:' '  mode: deterministic' '  profile: core' '  state: PLANNING' '  knowledge_state: not_started' '  topology: orchestrated' \
+    'freeze:' '  task_sha256: PENDING' '  evidence_sha256: PENDING' '  plan_sha256: PENDING' '  policy_sha256: PENDING' \
+    'baseline:' '  status: pending' \
+    'handoff:' '  state: PLANNED' '  verification_patch_sha256: PENDING' '  review_patch_sha256: PENDING' '  code_done_patch_sha256: PENDING' \
+    'worker_evidence:' '  required: true' 'tdd:' '  required: true' \
+    'completion_report:' '  required: true' '  adapter: PENDING' '  published: false' '  receipt: PENDING' \
+    > "$tmp/.agents/runs/DELIVERKNOW/RUN.yaml"
+  printf '# review\n' > "$tmp/.agents/runs/DELIVERKNOW/review/code-review.md"; printf '# verification\n' > "$tmp/.agents/runs/DELIVERKNOW/review/verification.md"; printf '# result\n' > "$tmp/.agents/runs/DELIVERKNOW/RESULT.md"
+  (cd "$tmp"; git init -q; git config user.email deliverknow@example.invalid; git config user.name fixture
+    printf '# DELIVERKNOW task\n' > tasks/DELIVERKNOW.md; : > impl.txt; printf '# Wiki index\n' > docs/wiki/index.md
+    git add -- .agents scripts tasks impl.txt docs/wiki; git commit -qm baseline
+
+    ./scripts/agent.sh baseline DELIVERKNOW
+    printf 'discovered\n' >> .agents/runs/DELIVERKNOW/EVIDENCE.md
+    printf 'planned\n' >> .agents/runs/DELIVERKNOW/PLAN.md
+    ./scripts/agent.sh freeze DELIVERKNOW
+    ./scripts/agent.sh handoff DELIVERKNOW IMPLEMENTING
+    AGENT_ROLE=implementation_worker sh -c "printf 'command: go test ./...\ntarget: impl.txt\nexpected_failure: TestImpl fails: Find() does not exist yet, specifically\n' | ./scripts/agent.sh worker-evidence DELIVERKNOW RED fail"
+    printf 'implemented\n' > impl.txt
+    AGENT_ROLE=implementation_worker sh -c "printf 'command: go test ./...\ntarget: impl.txt\n' | ./scripts/agent.sh worker-evidence DELIVERKNOW GREEN pass"
+    ./scripts/agent.sh handoff DELIVERKNOW VERIFIED
+    ./scripts/agent.sh handoff DELIVERKNOW REVIEWED
+    ./scripts/agent.sh handoff DELIVERKNOW CODE_DONE
+
+    # Pre-knowledge-transaction: delivery-check already succeeds at plain
+    # CODE_DONE (unchanged prior behavior — no knowledge-scope diff exists
+    # yet, so verify_knowledge_scope has nothing to object to).
+    ./scripts/agent.sh delivery-check DELIVERKNOW
+
+    # (1) An unauthorized application-scope change still fails delivery-check
+    # closed, regardless of knowledge-transaction state — the knowledge-scope
+    # mechanism never relaxes application-scope enforcement.
+    printf 'rogue application edit\n' > rogue.txt
+    if ./scripts/agent.sh delivery-check DELIVERKNOW; then echo "FAIL: delivery-check accepted an unmapped application-scope path" >&2; exit 1; fi
+    rm -f rogue.txt
+
+    # (2) A knowledge-scope diff with no recorded-complete transaction still
+    # fails delivery-check closed.
+    printf '# Lesson\n' > docs/wiki/lesson.md
+    if ./scripts/agent.sh delivery-check DELIVERKNOW; then echo "FAIL: delivery-check accepted a knowledge-scope diff with no recorded transaction" >&2; exit 1; fi
+
+    # (3) A mismatched not_applicable (real diff present) still fails
+    # delivery-check closed.
+    ./scripts/agent.sh knowledge-done DELIVERKNOW not_applicable
+    if ./scripts/agent.sh delivery-check DELIVERKNOW; then echo "FAIL: delivery-check accepted knowledge_state=not_applicable despite a real diff" >&2; exit 1; fi
+
+    # (4) The real observed sequence this test reproduces: a legitimate knowledge transaction is
+    # recorded KNOWLEDGE_DONE, the completion report is published/verified,
+    # DONE is reached — and delivery-check, run *afterward*, now succeeds
+    # instead of re-rejecting the same diff DONE already accepted.
+    ./scripts/agent.sh knowledge-done DELIVERKNOW KNOWLEDGE_DONE
+    printf '%s\n' '# Completion Report: DELIVERKNOW' '' '## Implementation Summary' 'impl.txt gained Find().' '' \
+      '## TDD Evidence' 'RED failed for the expected reason; GREEN passed.' '' '## Verification' 'go test ./... passed.' '' \
+      '## Review Result' 'Approved.' '' '## Known Limitations / Follow-up' 'None.' \
+      > .agents/runs/DELIVERKNOW/COMPLETION_REPORT.md
+    ./scripts/agent.sh publish-completion-report DELIVERKNOW markdown
+    ./scripts/agent.sh verify-completion-report DELIVERKNOW
+    ./scripts/agent.sh handoff DELIVERKNOW DONE
+    ./scripts/agent.sh delivery-check DELIVERKNOW
+
+    # (5) Consistency still holds post-DONE: removing the only knowledge-scope
+    # diff while knowledge_state stays KNOWLEDGE_DONE fails delivery-check
+    # closed (same zero-diff-but-claimed-complete rejection DONE itself uses).
+    rm -f docs/wiki/lesson.md
+    if ./scripts/agent.sh delivery-check DELIVERKNOW; then echo "FAIL: delivery-check accepted KNOWLEDGE_DONE with zero knowledge-scope diffs" >&2; exit 1; fi)
+  echo 'agent delivery-check knowledge-scope tests passed'
+}
+
 # Proves execution.topology: standalone — the complement of policy_test's
 # orchestrated case. The generic control plane does not know or care which
 # vendor is running as full_lifecycle here; this fixture is run twice under
@@ -1377,7 +1480,7 @@ command=${1:-}; case "$command" in
   publish-completion-report) publish_completion_report "${2:?usage: $0 publish-completion-report <TASK-ID> [ADAPTER]}" "${3:-markdown}" ;;
   verify-completion-report) verify_completion_report "${2:?usage: $0 verify-completion-report <TASK-ID>}" ;;
   validate) id=${2:?usage: $0 validate <TASK-ID>}; require_run "$id"; dir=$(run_dir "$id"); for f in TASK.md EVIDENCE.md PLAN.md RUN.yaml review/code-review.md review/verification.md RESULT.md; do [ -f "$dir/$f" ] || fail "missing required artifact: $f"; done; if section_key_present "$dir" completion_report required; then [ -f "$dir/COMPLETION_REPORT.md" ] || fail "missing required artifact: COMPLETION_REPORT.md"; fi; validate_control_artifacts "$id"; scope_mappings "$dir/PLAN.md" >/dev/null; status=$(baseline_status "$dir"); if [ "$status" = captured ]; then validate_captured_baseline "$dir"; else historical_reference "$id" || fail "baseline missing or pending: $id"; fi; verify_freshness "$id"; verify_handoff "$id"; echo "run validated: $id" ;;
-  test) require_full_lifecycle; fixture_test; branch_test; policy_test; standalone_test; worker_evidence_write_failure_test; knowledge_scope_test ;;
+  test) require_full_lifecycle; fixture_test; branch_test; policy_test; standalone_test; worker_evidence_write_failure_test; knowledge_scope_test; delivery_check_knowledge_scope_test ;;
   role-test) require_full_lifecycle; role_test ;;
   *) echo "usage: $0 {role|status|effective|baseline|branch|freeze|refreeze|verify-freeze|verify-scope|verify-knowledge-scope|freshness|handoff|verify-handoff|delivery-check|worker-evidence|verify-worker-evidence|knowledge-done|publish-completion-report|verify-completion-report|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
 esac
