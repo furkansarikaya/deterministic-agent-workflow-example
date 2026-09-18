@@ -49,6 +49,9 @@ run_state() { sed -n 's/^[[:space:]]*state: *//p' "$1/RUN.yaml" | head -1 | tr -
 baseline_status() { awk '/^baseline:$/ { inside=1; next } inside && /^[^[:space:]]/ { exit } inside && /^[[:space:]]*status:/ { sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit }' "$1/RUN.yaml"; }
 repository_base_sha() { awk '/^repository:$/ { inside=1; next } inside && /^[^[:space:]]/ { exit } inside && /^[[:space:]]*base_sha:/ { sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit }' "$1/RUN.yaml"; }
 section_value() { awk -v section="$2" -v key="$3" '$0 == section ":" { inside=1; next } inside && /^[^[:space:]]/ { exit } inside && $0 ~ "^[[:space:]]*" key ":" { sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit }' "$1/RUN.yaml"; }
+# True only when the key line itself exists (regardless of value), distinguishing a
+# pre-branch-policy RUN.yaml (key entirely absent) from a new run awaiting `branch`.
+section_key_present() { awk -v section="$2" -v key="$3" '$0 == section ":" { inside=1; next } inside && /^[^[:space:]]/ { exit } inside && $0 ~ "^[[:space:]]*" key ":" { found=1 } END { exit !found }' "$1/RUN.yaml"; }
 replace_section_value() {
   awk -v section="$2" -v key="$3" -v value="$4" '
     $0 == section ":" { inside=1; print; next }
@@ -59,6 +62,22 @@ replace_section_value() {
   ' "$1/RUN.yaml" > "$5"
 }
 historical_reference() { [ "$1" = EXAMPLE-001 ] && [ "$(baseline_status "$(run_dir "$1")")" = legacy_not_captured ] && [ "$(run_state "$(run_dir "$1")")" = CODE_DONE ]; }
+
+# Deterministic per-task Git branch isolation. A RUN.yaml with no repository.task_branch
+# key at all predates this policy (e.g. EXAMPLE-001) and is never retroactively enforced —
+# it stays inspectable exactly as it completed. A RUN.yaml that HAS the key is a new-style
+# run and must have it resolved (not PENDING) with the working tree actually on it before
+# any mutating lifecycle phase proceeds.
+enforce_task_branch() {
+  id=$1; dir=$(run_dir "$id")
+  section_key_present "$dir" repository task_branch || return 0
+  historical_reference "$id" && return 0
+  expected=$(section_value "$dir" repository task_branch)
+  case "$expected" in ''|PENDING) fail "task branch not established for $id; run '$0 branch $id' first" ;; esac
+  current=$(git -C "$root" branch --show-current) || true
+  [ -n "$current" ] || fail "detached HEAD: expected task branch $expected for $id"
+  [ "$current" = "$expected" ] || fail "wrong git branch for $id: expected $expected, currently on $current"
+}
 
 # Only regular files are fingerprinted. Symlinks and special files are refused rather
 # than followed, so a baseline never reads outside the working tree unexpectedly.
@@ -99,6 +118,7 @@ baseline() {
   id=$1; require_run "$id"; dir=$(run_dir "$id")
   [ "$(run_state "$dir")" != CODE_DONE ] || fail "cannot record a baseline for CODE_DONE run: $id"
   status=$(baseline_status "$dir"); case "$status" in ''|pending) ;; *) fail "baseline already exists for $id; refusing to overwrite";; esac
+  enforce_task_branch "$id"
   tmp=$dir/RUN.yaml.tmp; remove_pending_baseline "$dir/RUN.yaml" "$tmp"
   base_sha=$(git -C "$root" rev-parse HEAD)
   replace_repository_base_sha "$tmp" "$base_sha" "$tmp.base" || { rm -f "$tmp" "$tmp.base"; fail "RUN.yaml requires repository.base_sha"; }
@@ -194,6 +214,7 @@ task_patch_fingerprint() {
 }
 record_handoff() {
   id=$1 phase=$2; require_run "$id"; dir=$(run_dir "$id")
+  enforce_task_branch "$id"
   verify_freshness "$id"; verify_scope "$id"
   case "$phase" in IMPLEMENTING|VERIFIED|REVIEWED|CODE_DONE) ;; *) fail "invalid handoff phase";; esac
   patch=$(task_patch_fingerprint "$id")
@@ -240,6 +261,7 @@ delivery_check() {
   id=$1; require_run "$id"; dir=$(run_dir "$id"); historical_reference "$id" && fail "delivery unavailable for historical reference"
   [ "$(run_state "$dir")" = CODE_DONE ] || fail "delivery blocked: CODE_DONE required"
   branch=$(git -C "$root" branch --show-current); [ -n "$branch" ] || fail "delivery blocked: detached HEAD"
+  enforce_task_branch "$id"
   verify_freshness "$id"; verify_scope "$id"; verify_handoff "$id"
   patch=$(task_patch_fingerprint "$id"); [ "$(section_value "$dir" handoff verification_patch_sha256)" = "$patch" ] || fail "delivery blocked: verification stale or missing"
   [ "$(section_value "$dir" handoff review_patch_sha256)" = "$patch" ] || fail "delivery blocked: review stale or missing"
@@ -288,7 +310,7 @@ validate_captured_baseline() {
 }
 
 verify_scope() {
-  id=$1; require_run "$id"; dir=$(run_dir "$id"); mappings=$(scope_mappings "$dir/PLAN.md") || fail "invalid scope mapping"; [ -n "$mappings" ] || fail "scope mapping missing"
+  id=$1; require_run "$id"; dir=$(run_dir "$id"); enforce_task_branch "$id"; mappings=$(scope_mappings "$dir/PLAN.md") || fail "invalid scope mapping"; [ -n "$mappings" ] || fail "scope mapping missing"
   status=$(baseline_status "$dir"); [ "$status" = captured ] || { historical_reference "$id" && fail "scope verification unavailable for historical reference: $id"; fail "baseline required before scope verification: $id"; }
   tmp=$(mktemp "${TMPDIR:-/tmp}/agent-scope.XXXXXX")
   for type in tracked untracked; do
@@ -307,8 +329,65 @@ verify_scope() {
 freeze() {
   id=$1; require_run "$id"; dir=$(run_dir "$id"); for f in TASK.md EVIDENCE.md PLAN.md RUN.yaml; do [ -f "$dir/$f" ] || fail "missing $f"; done
   [ "$(run_state "$dir")" != CODE_DONE ] || fail "cannot freeze completed run: $id"; [ "$(baseline_status "$dir")" = captured ] || fail "baseline required before freeze: $id"
+  enforce_task_branch "$id"
   if freeze_hash_present "$dir"; then [ "${2:-}" = refreeze ] && [ -n "${3:-}" ] && [ -f "$dir/amendments/$3" ] || fail "existing freeze requires explicit amendment"; fi
   set_task_source_revision "$dir"; tmp=$dir/RUN.yaml.tmp; replace_hashes "$dir" "$tmp"; mv "$tmp" "$dir/RUN.yaml"; echo "freeze recorded: $id"
+}
+
+# Deterministic, ASCII-safe, hyphenated slug — no timestamps, no random suffixes.
+# local_markdown reuses the task source file's own canonical basename; `none` (used only by
+# this file's own role/self-test fixtures) has no title to derive from, so it is a fixed
+# constant. Either way the result is a pure function of already-frozen task metadata.
+derive_task_slug() {
+  dir=$1; id=$(section_value "$dir" task id); type=$(section_value "$dir" task_source type)
+  case "$type" in
+    local_markdown)
+      path=$(section_value "$dir" task_source path); base=$(basename "$path" .md)
+      case "$base" in "$id"-*) slug=${base#"$id"-} ;; *) slug=$base ;; esac ;;
+    none) slug=run ;;
+    *) fail "task source adapter unavailable for slug derivation: ${type:-missing}" ;;
+  esac
+  slug=$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
+  [ -n "$slug" ] || fail "derived task slug is empty for $id"
+  printf '%s\n' "$slug"
+}
+
+# Establishes (or, on resume, re-attaches to) this run's dedicated task/<TASK-ID>-<slug>
+# branch, created from the canonical integration branch's exact current tip — never from
+# whatever HEAD happens to be. Full-lifecycle only: an implementation_worker must never
+# create or switch branches. Must run before baseline; a CODE_DONE run's branch is fixed.
+branch_setup() {
+  id=$1; require_run "$id"; dir=$(run_dir "$id")
+  [ "$(run_state "$dir")" != CODE_DONE ] || fail "cannot modify task branch on CODE_DONE run: $id"
+  canonical=$(config_value canonical_branch "$config"); [ -n "$canonical" ] || fail "canonical_branch not configured"
+  current=$(git -C "$root" branch --show-current) || true
+  [ -n "$current" ] || fail "task branch setup requires a checked-out branch, not detached HEAD"
+  existing=$(section_value "$dir" repository task_branch)
+  case "$existing" in
+    ''|PENDING)
+      [ "$current" = "$canonical" ] || fail "task branch setup must start from canonical branch ($canonical); currently on: $current"
+      bstatus=$(baseline_status "$dir"); case "$bstatus" in ''|pending) ;; *) fail "task branch setup must occur before baseline: $id";; esac
+      canonical_sha=$(git -C "$root" rev-parse "refs/heads/$canonical") || fail "canonical branch not found locally: $canonical"
+      slug=$(derive_task_slug "$dir") || return 1
+      task_branch="task/$id-$slug"
+      if git -C "$root" show-ref --verify --quiet "refs/heads/$task_branch"; then
+        branch_sha=$(git -C "$root" rev-parse "refs/heads/$task_branch")
+        [ "$branch_sha" = "$canonical_sha" ] || fail "existing branch $task_branch is not compatible with canonical base $canonical_sha; will not reuse or overwrite"
+      else
+        git -C "$root" branch "$task_branch" "$canonical_sha" || fail "failed to create task branch: $task_branch"
+      fi
+      git -C "$root" checkout "$task_branch" || fail "failed to switch to task branch: $task_branch"
+      tmp=$dir/RUN.yaml.tmp; replace_section_value "$dir" repository canonical_branch "$canonical" "$tmp" && mv "$tmp" "$dir/RUN.yaml"
+      tmp=$dir/RUN.yaml.tmp; replace_section_value "$dir" repository task_branch "$task_branch" "$tmp" && mv "$tmp" "$dir/RUN.yaml"
+      echo "task branch established: $id $task_branch" ;;
+    *)
+      git -C "$root" show-ref --verify --quiet "refs/heads/$existing" || fail "recorded task branch missing: $existing; will not regenerate, recover manually"
+      if [ "$current" != "$existing" ]; then
+        [ "$current" = "$canonical" ] || fail "cannot resume $id: on unexpected branch $current (expected $canonical or $existing)"
+        git -C "$root" checkout "$existing" || fail "failed to switch to recorded task branch: $existing"
+      fi
+      echo "task branch resumed: $id $existing" ;;
+  esac
 }
 
 fixture_test() {
@@ -352,12 +431,78 @@ role_test() {
   echo 'agent role tests passed'
 }
 
+# Deterministic per-task branch isolation. A run whose RUN.yaml has no repository.task_branch
+# key (like FIX/ROLE above, and like the real EXAMPLE-001) is untouched by any of this —
+# proven by reusing those exact fixtures unmodified. BRANCH below is new-style: it must
+# establish a task/<TASK-ID>-<slug> branch from the canonical branch's exact tip before
+# baseline is even possible, and every mutating phase after that must run on that exact branch.
+branch_test() {
+  tmp=$(mktemp -d /tmp/deterministic-branch.XXXXXX); tmp2=$(mktemp -d /tmp/deterministic-branch-dirty.XXXXXX); trap 'rm -rf "$tmp" "$tmp2"' EXIT
+  mkdir -p "$tmp/.agents/runs/BRANCH/review" "$tmp/.agents/modes" "$tmp/scripts" "$tmp/tasks"
+  cp "$root/scripts/agent.sh" "$tmp/scripts/"; cp "$root/.agents/config.yaml" "$tmp/.agents/"; cp "$root/.agents/modes/"*.yaml "$tmp/.agents/modes/"
+  printf 'BRANCH\n' > "$tmp/.agents/ACTIVE_RUN"; printf '# Task\n' > "$tmp/.agents/runs/BRANCH/TASK.md"; printf '# Evidence\n' > "$tmp/.agents/runs/BRANCH/EVIDENCE.md"
+  printf '%s\n' '---' 'scope:' '  - path: authorized.txt' '    criteria: [AC-1]' '---' '# Plan' > "$tmp/.agents/runs/BRANCH/PLAN.md"
+  printf '%s\n' 'task:' '  id: BRANCH' 'repository:' '  base_sha: PENDING' '  canonical_branch: PENDING' '  task_branch: PENDING' 'task_source:' '  type: local_markdown' '  path: tasks/BRANCH-sample-feature.md' '  revision: PENDING' 'execution:' '  mode: deterministic' '  profile: core' '  state: PLANNING' 'freeze:' '  task_sha256: PENDING' '  evidence_sha256: PENDING' '  plan_sha256: PENDING' '  policy_sha256: PENDING' 'baseline:' '  status: pending' 'handoff:' '  state: PLANNED' '  verification_patch_sha256: PENDING' '  review_patch_sha256: PENDING' '  code_done_patch_sha256: PENDING' > "$tmp/.agents/runs/BRANCH/RUN.yaml"
+  printf '# review\n' > "$tmp/.agents/runs/BRANCH/review/code-review.md"; printf '# verification\n' > "$tmp/.agents/runs/BRANCH/review/verification.md"; printf '# result\n' > "$tmp/.agents/runs/BRANCH/RESULT.md"
+  (cd "$tmp"; git init -q -b main; git config user.email branch@example.invalid; git config user.name fixture
+    : > authorized.txt; printf '# sample feature\n' > tasks/BRANCH-sample-feature.md; git add -- .agents scripts tasks authorized.txt; git commit -qm baseline
+    canonical_sha=$(git rev-parse HEAD)
+    if ./scripts/agent.sh baseline BRANCH; then exit 1; fi
+    if AGENT_ROLE=implementation_worker ./scripts/agent.sh branch BRANCH; then exit 1; fi
+    ./scripts/agent.sh branch BRANCH
+    [ "$(git branch --show-current)" = task/BRANCH-sample-feature ]
+    [ "$(git rev-parse task/BRANCH-sample-feature)" = "$canonical_sha" ]
+    ./scripts/agent.sh branch BRANCH
+    [ "$(git branch --show-current)" = task/BRANCH-sample-feature ]
+    [ "$(git branch --list 'task/BRANCH-*' | wc -l | tr -d ' ')" = 1 ]
+    ./scripts/agent.sh baseline BRANCH; printf 'discovered\n' >> .agents/runs/BRANCH/EVIDENCE.md; printf 'planned\n' >> .agents/runs/BRANCH/PLAN.md; ./scripts/agent.sh freeze BRANCH
+    ./scripts/agent.sh handoff BRANCH IMPLEMENTING
+    AGENT_ROLE=implementation_worker ./scripts/agent.sh verify-scope BRANCH; AGENT_ROLE=implementation_worker ./scripts/agent.sh handoff BRANCH IMPLEMENTING
+    git checkout -q main
+    if ./scripts/agent.sh handoff BRANCH VERIFIED; then exit 1; fi
+    if AGENT_ROLE=implementation_worker ./scripts/agent.sh verify-scope BRANCH; then exit 1; fi
+    git checkout -q --detach "$canonical_sha"
+    if ./scripts/agent.sh handoff BRANCH VERIFIED; then exit 1; fi
+    git checkout -q -b random-feature
+    if ./scripts/agent.sh handoff BRANCH VERIFIED; then exit 1; fi
+    if AGENT_ROLE=implementation_worker ./scripts/agent.sh verify-scope BRANCH; then exit 1; fi
+    git checkout -q main; git branch task/OTHER-unrelated "$canonical_sha"; git checkout -q task/OTHER-unrelated
+    if ./scripts/agent.sh handoff BRANCH VERIFIED; then exit 1; fi
+    git checkout -q main; git branch -D task/OTHER-unrelated random-feature > /dev/null
+    git checkout -q task/BRANCH-sample-feature
+    cp .agents/runs/BRANCH/RUN.yaml tampered.original
+    sed 's#task_branch: "task/BRANCH-sample-feature"#task_branch: "task/BRANCH-tampered"#' tampered.original > .agents/runs/BRANCH/RUN.yaml
+    if ./scripts/agent.sh handoff BRANCH VERIFIED; then exit 1; fi
+    mv tampered.original .agents/runs/BRANCH/RUN.yaml
+    ./scripts/agent.sh handoff BRANCH VERIFIED; ./scripts/agent.sh handoff BRANCH REVIEWED; ./scripts/agent.sh handoff BRANCH CODE_DONE; ./scripts/agent.sh delivery-check BRANCH
+    git checkout -q main; if ./scripts/agent.sh branch BRANCH; then exit 1; fi; git checkout -q task/BRANCH-sample-feature)
+  mkdir -p "$tmp2/.agents/runs/CONFLICT/review" "$tmp2/scripts" "$tmp2/.agents/modes"
+  cp "$root/scripts/agent.sh" "$tmp2/scripts/"; cp "$root/.agents/config.yaml" "$tmp2/.agents/"; cp "$root/.agents/modes/"*.yaml "$tmp2/.agents/modes/"
+  printf '# Task\n' > "$tmp2/.agents/runs/CONFLICT/TASK.md"; printf '# Evidence\n' > "$tmp2/.agents/runs/CONFLICT/EVIDENCE.md"
+  printf '%s\n' '---' 'scope:' '  - path: tracked.txt' '    criteria: [AC-1]' '---' '# Plan' > "$tmp2/.agents/runs/CONFLICT/PLAN.md"
+  printf '%s\n' 'task:' '  id: CONFLICT' 'repository:' '  base_sha: PENDING' '  canonical_branch: PENDING' '  task_branch: PENDING' 'task_source:' '  type: none' '  revision: not_applicable' 'execution:' '  mode: deterministic' '  profile: core' '  state: PLANNING' 'freeze:' '  task_sha256: PENDING' '  evidence_sha256: PENDING' '  plan_sha256: PENDING' '  policy_sha256: PENDING' 'baseline:' '  status: pending' 'handoff:' '  state: PLANNED' '  verification_patch_sha256: PENDING' '  review_patch_sha256: PENDING' '  code_done_patch_sha256: PENDING' > "$tmp2/.agents/runs/CONFLICT/RUN.yaml"
+  printf '# review\n' > "$tmp2/.agents/runs/CONFLICT/review/code-review.md"; printf '# verification\n' > "$tmp2/.agents/runs/CONFLICT/review/verification.md"; printf '# result\n' > "$tmp2/.agents/runs/CONFLICT/RESULT.md"
+  (cd "$tmp2"; git init -q -b main; git config user.email conflict@example.invalid; git config user.name fixture
+    printf 'v1\n' > tracked.txt; git add -- .agents scripts tracked.txt; git commit -qm base
+    base_sha=$(git rev-parse HEAD)
+    git branch task/CONFLICT-run "$base_sha"
+    printf 'v2\n' > tracked.txt; git add tracked.txt; git commit -qm advance
+    if ./scripts/agent.sh branch CONFLICT; then exit 1; fi
+    [ "$(git rev-parse task/CONFLICT-run)" = "$base_sha" ]
+    [ "$(git branch --show-current)" = main ]
+    printf 'uncommitted\n' >> tracked.txt
+    if git checkout task/CONFLICT-run 2>/dev/null; then exit 1; fi
+    [ "$(git branch --show-current)" = main ]; grep -Fxq uncommitted tracked.txt)
+  echo 'branch policy tests passed'
+}
+
 valid_role
 command=${1:-}; case "$command" in
   role) printf 'role=%s\n' "$execution_role" ;;
   status) id=$(active_run); echo "active_task=${id:-none}"; echo "implementation_allowed=$( [ -n "$id" ] && echo true || echo false )"; effective "$id" ;;
   effective) effective "${2:-}" ;;
   baseline) require_full_lifecycle; baseline "${2:?usage: $0 baseline <TASK-ID>}" ;;
+  branch) require_full_lifecycle; branch_setup "${2:?usage: $0 branch <TASK-ID>}" ;;
   freeze) require_full_lifecycle; freeze "${2:?usage: $0 freeze <TASK-ID>}" ;;
   refreeze) require_full_lifecycle; freeze "${2:?usage: $0 refreeze <TASK-ID> <AMENDMENT>}" refreeze "${3:?usage: $0 refreeze <TASK-ID> <AMENDMENT>}" ;;
   verify-freeze) verify_freeze "${2:?usage: $0 verify-freeze <TASK-ID>}" ;;
@@ -367,7 +512,7 @@ command=${1:-}; case "$command" in
   verify-handoff) verify_handoff "${2:?usage: $0 verify-handoff <TASK-ID>}" ;;
   delivery-check) require_full_lifecycle; delivery_check "${2:?usage: $0 delivery-check <TASK-ID>}" ;;
   validate) id=${2:?usage: $0 validate <TASK-ID>}; require_run "$id"; dir=$(run_dir "$id"); for f in TASK.md EVIDENCE.md PLAN.md RUN.yaml review/code-review.md review/verification.md RESULT.md; do [ -f "$dir/$f" ] || fail "missing required artifact: $f"; done; validate_control_artifacts "$id"; scope_mappings "$dir/PLAN.md" >/dev/null; status=$(baseline_status "$dir"); if [ "$status" = captured ]; then validate_captured_baseline "$dir"; else historical_reference "$id" || fail "baseline missing or pending: $id"; fi; verify_freshness "$id"; verify_handoff "$id"; echo "run validated: $id" ;;
-  test) require_full_lifecycle; fixture_test ;;
+  test) require_full_lifecycle; fixture_test; branch_test ;;
   role-test) require_full_lifecycle; role_test ;;
-  *) echo "usage: $0 {role|status|effective|baseline|freeze|refreeze|verify-freeze|freshness|handoff|verify-handoff|delivery-check|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
+  *) echo "usage: $0 {role|status|effective|baseline|branch|freeze|refreeze|verify-freeze|freshness|handoff|verify-handoff|delivery-check|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
 esac

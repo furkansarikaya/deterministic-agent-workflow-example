@@ -5,6 +5,8 @@ task:
 
 repository:
   base_sha: PENDING
+  canonical_branch: PENDING
+  task_branch: PENDING
 
 task_source:
   type: local_markdown

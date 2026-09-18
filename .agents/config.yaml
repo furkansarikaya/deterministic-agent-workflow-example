@@ -3,6 +3,9 @@ default_profile: core
 active_run_file: .agents/ACTIVE_RUN
 # Checked-in template state: ACTIVE_RUN is empty. A real task explicitly sets one ID.
 policy_source: .agents/modes
+# Single authoritative source for the canonical integration branch. A deterministic
+# task run must never implement directly on this branch; see .agents/GIT.md.
+canonical_branch: main
 safety:
   destructive_git_requires_explicit_authorization: true
   external_network_requires_task_authorization: true

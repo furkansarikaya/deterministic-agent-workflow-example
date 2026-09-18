@@ -3,10 +3,18 @@
 The checked-in golden template has no active task: `ACTIVE_RUN` is intentionally empty and implementation is blocked. For an application task, it must contain exactly one valid run ID.
 
 ```text
-CREATE TASK → ACTIVATE RUN → RECORD BASELINE → DISCOVER → EVIDENCE FREEZE → PLAN → PLAN FREEZE → FRESHNESS GATE → IMPLEMENT → VERIFY → REVIEW → CODE DONE → DELIVERY READY
-                                                                  ↓ fail
-                                                      CAPTURE EVIDENCE → BOUNDED FIX → VERIFY
+CREATE TASK → ACTIVATE RUN → ESTABLISH TASK BRANCH → RECORD BASELINE → DISCOVER → EVIDENCE FREEZE → PLAN → PLAN FREEZE → FRESHNESS GATE → IMPLEMENT → VERIFY → REVIEW → CODE DONE → DELIVERY READY
+                                                                                        ↓ fail
+                                                                            CAPTURE EVIDENCE → BOUNDED FIX → VERIFY
 ```
+
+`agent.sh branch <TASK-ID>` must run before `baseline` for any run whose `RUN.yaml` declares
+`repository.task_branch` (every run created from here on). It creates
+`task/<TASK-ID>-<slug>` from the canonical integration branch's exact tip and switches to
+it; every later mutating command (`baseline`, `freeze`/`refreeze`, `handoff`, `verify-scope`,
+`delivery-check`) then requires the working tree to still be on that exact branch. See
+`.agents/GIT.md` for the full policy, naming algorithm, resume semantics, and legacy-run
+handling — it is deliberately not restated here.
 
 DISCOVER is read-only and uses progressive disclosure: start with TASK plus the smallest sufficient repository/tests. Load detailed control guidance only when the current operation needs it; do not bulk-load `.agents/**`, wiki pages, old runs, or session history. Query task-relevant wiki knowledge only when TASK/repository/tests are insufficient. Never edit application/tests/wiki, install dependencies, or broadly refactor in DISCOVER.
 
