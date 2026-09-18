@@ -329,6 +329,53 @@ delivery_check() {
   printf 'delivery_branch=%s\ndelivery_ready=true\n' "$branch"
 }
 
+# General structural sanity check for a run at any phase (not gated on
+# CODE_DONE/DONE, unlike delivery_check) — required artifacts present,
+# control-artifact set clean, scope mappings well-formed, baseline/freshness
+# current, handoff integrity intact. It must apply the exact same
+# allow_knowledge=1 relaxation delivery_check already uses for a
+# captured-baseline run (verify_scope 1 -> verify_knowledge_scope ->
+# verify_handoff 1): otherwise a completed Transaction B that DONE and
+# delivery_check have both already accepted still fails validate purely
+# because verify_handoff's own default is strict/0, which never had any
+# concept of Transaction B at all (the exact bug DONE and delivery_check
+# were separately fixed for). allow_knowledge only defers a real
+# knowledge-scope path to verify_knowledge_scope's own independent
+# judgment; it never approves one outright — an invalid, missing, or
+# inconsistent knowledge-transaction state, or any unauthorized
+# application-scope change, still fails validate closed exactly as before.
+# A historical-reference run (no captured baseline, e.g. EXAMPLE-001) is
+# unaffected: verify_scope/verify_knowledge_scope are skipped for it here
+# exactly as they always effectively were (verify_handoff's own internal
+# historical-reference short-circuit already meant verify_scope was never
+# reached for such a run before this change either) — calling either
+# directly would instead fail outright ("unavailable for historical
+# reference"), which would be a regression, not a fix.
+validate_run() {
+  id=$1; require_run "$id"; dir=$(run_dir "$id")
+  for f in TASK.md EVIDENCE.md PLAN.md RUN.yaml review/code-review.md review/verification.md RESULT.md; do
+    [ -f "$dir/$f" ] || fail "missing required artifact: $f"
+  done
+  if section_key_present "$dir" completion_report required; then
+    [ -f "$dir/COMPLETION_REPORT.md" ] || fail "missing required artifact: COMPLETION_REPORT.md"
+  fi
+  validate_control_artifacts "$id"
+  scope_mappings "$dir/PLAN.md" >/dev/null
+  status=$(baseline_status "$dir")
+  if [ "$status" = captured ]; then
+    validate_captured_baseline "$dir"
+  else
+    historical_reference "$id" || fail "baseline missing or pending: $id"
+  fi
+  verify_freshness "$id"
+  if [ "$status" = captured ]; then
+    verify_scope "$id" 1
+    verify_knowledge_scope "$id"
+  fi
+  verify_handoff "$id" 1
+  echo "run validated: $id"
+}
+
 # Run metadata is deliberately separate from application scope. This exact allowlist
 # applies only to the active run directory; no other .agents paths are ignored.
 known_control_artifact() {
@@ -1263,6 +1310,164 @@ delivery_check_knowledge_scope_test() {
   echo 'agent delivery-check knowledge-scope tests passed'
 }
 
+# Regression test for a real observed `agent.sh validate` bug: unlike DONE
+# and delivery-check (both independently fixed to run verify_scope/
+# verify_handoff with allow_knowledge=1 plus verify_knowledge_scope for a
+# legitimate Transaction B), `validate` still called verify_handoff in
+# strict/default mode, so a knowledge transaction DONE and delivery-check
+# had both already accepted would still fail validate with "unexpected or
+# unmapped task-introduced paths" naming every docs/wiki/** path — pure
+# knowledge-blindness in one specific caller, not a real scope violation.
+# Proves the same five-case symmetry as delivery_check_knowledge_scope_test,
+# this time against `validate`: (1) an application-scope violation still
+# fails validate closed; (2) a knowledge-scope diff with no recorded
+# transaction still fails closed; (3) a mismatched not_applicable still
+# fails closed; (4) a genuine KNOWLEDGE_DONE transaction now legitimately
+# passes validate, both before and after the real DONE handoff transition;
+# (5) KNOWLEDGE_DONE with zero actual knowledge-scope diffs still fails
+# closed. Also confirms validate's pre-existing, unrelated behavior is
+# untouched: it still requires COMPLETION_REPORT.md up front when
+# completion_report.required is true, and it still succeeds with zero
+# knowledge-scope diffs at all (the common case, unaffected by this fix).
+validate_knowledge_scope_test() {
+  tmp=$(mktemp -d /tmp/deterministic-validateknow.XXXXXX); trap 'rm -rf "$tmp"' EXIT
+  mkdir -p "$tmp/.agents/runs/VALIDATEKNOW/review" "$tmp/.agents/modes" "$tmp/.agents/task-integrations" "$tmp/scripts" "$tmp/tasks" "$tmp/docs/wiki"
+  cp "$root/scripts/agent.sh" "$tmp/scripts/"; cp "$root/.agents/config.yaml" "$tmp/.agents/"; cp "$root/.agents/modes/"*.yaml "$tmp/.agents/modes/"
+  cp "$root/.agents/task-integrations/markdown.sh" "$tmp/.agents/task-integrations/"; chmod +x "$tmp/.agents/task-integrations/markdown.sh"
+  printf 'VALIDATEKNOW\n' > "$tmp/.agents/ACTIVE_RUN"
+  printf '# Task: VALIDATEKNOW\n' > "$tmp/.agents/runs/VALIDATEKNOW/TASK.md"
+  printf '# Evidence\n' > "$tmp/.agents/runs/VALIDATEKNOW/EVIDENCE.md"
+  printf '%s\n' '---' 'scope:' '  - path: impl.txt' '    criteria: [AC-1]' '---' '# Plan' > "$tmp/.agents/runs/VALIDATEKNOW/PLAN.md"
+  printf '%s\n' 'repository:' '  base_sha: PENDING' 'task_source:' '  type: local_markdown' '  path: tasks/VALIDATEKNOW.md' '  revision: PENDING' \
+    'execution:' '  mode: deterministic' '  profile: core' '  state: PLANNING' '  knowledge_state: not_started' '  topology: orchestrated' \
+    'freeze:' '  task_sha256: PENDING' '  evidence_sha256: PENDING' '  plan_sha256: PENDING' '  policy_sha256: PENDING' \
+    'baseline:' '  status: pending' \
+    'handoff:' '  state: PLANNED' '  verification_patch_sha256: PENDING' '  review_patch_sha256: PENDING' '  code_done_patch_sha256: PENDING' \
+    'worker_evidence:' '  required: true' 'tdd:' '  required: true' \
+    'completion_report:' '  required: true' '  adapter: PENDING' '  published: false' '  receipt: PENDING' \
+    > "$tmp/.agents/runs/VALIDATEKNOW/RUN.yaml"
+  printf '# review\n' > "$tmp/.agents/runs/VALIDATEKNOW/review/code-review.md"; printf '# verification\n' > "$tmp/.agents/runs/VALIDATEKNOW/review/verification.md"; printf '# result\n' > "$tmp/.agents/runs/VALIDATEKNOW/RESULT.md"
+  (cd "$tmp"; git init -q; git config user.email validateknow@example.invalid; git config user.name fixture
+    printf '# VALIDATEKNOW task\n' > tasks/VALIDATEKNOW.md; : > impl.txt; printf '# Wiki index\n' > docs/wiki/index.md
+    git add -- .agents scripts tasks impl.txt docs/wiki; git commit -qm baseline
+
+    ./scripts/agent.sh baseline VALIDATEKNOW
+    printf 'discovered\n' >> .agents/runs/VALIDATEKNOW/EVIDENCE.md
+    printf 'planned\n' >> .agents/runs/VALIDATEKNOW/PLAN.md
+    ./scripts/agent.sh freeze VALIDATEKNOW
+    ./scripts/agent.sh handoff VALIDATEKNOW IMPLEMENTING
+    AGENT_ROLE=implementation_worker sh -c "printf 'command: go test ./...\ntarget: impl.txt\nexpected_failure: TestImpl fails: Find() does not exist yet, specifically\n' | ./scripts/agent.sh worker-evidence VALIDATEKNOW RED fail"
+    printf 'implemented\n' > impl.txt
+    AGENT_ROLE=implementation_worker sh -c "printf 'command: go test ./...\ntarget: impl.txt\n' | ./scripts/agent.sh worker-evidence VALIDATEKNOW GREEN pass"
+    ./scripts/agent.sh handoff VALIDATEKNOW VERIFIED
+    ./scripts/agent.sh handoff VALIDATEKNOW REVIEWED
+    ./scripts/agent.sh handoff VALIDATEKNOW CODE_DONE
+
+    # Publish the completion report right after CODE_DONE (before any
+    # knowledge-scope diff exists), matching publish_completion_report's own
+    # requirement (CODE_DONE only, independent of knowledge_state) and so
+    # every `validate` call below passes the artifact-presence check and
+    # actually exercises the knowledge-scope logic under test, not an
+    # unrelated missing-file failure.
+    printf '%s\n' '# Completion Report: VALIDATEKNOW' '' '## Implementation Summary' 'impl.txt gained Find().' '' \
+      '## TDD Evidence' 'RED failed for the expected reason; GREEN passed.' '' '## Verification' 'go test ./... passed.' '' \
+      '## Review Result' 'Approved.' '' '## Known Limitations / Follow-up' 'None.' \
+      > .agents/runs/VALIDATEKNOW/COMPLETION_REPORT.md
+    ./scripts/agent.sh publish-completion-report VALIDATEKNOW markdown
+    ./scripts/agent.sh verify-completion-report VALIDATEKNOW
+
+    # Baseline: validate already succeeds with zero knowledge-scope diffs
+    # at all (unaffected by this fix — the common case).
+    ./scripts/agent.sh validate VALIDATEKNOW
+
+    # (1) A real application-scope violation still fails validate closed,
+    # with zero knowledge-scope diffs in the picture at all.
+    printf 'rogue application edit\n' > rogue.txt
+    if ./scripts/agent.sh validate VALIDATEKNOW; then echo "FAIL: validate accepted an unmapped application-scope path" >&2; exit 1; fi
+    rm -f rogue.txt
+
+    # (2) A knowledge-scope (docs/wiki/**) diff with no recorded-complete
+    # knowledge transaction still fails validate closed.
+    printf '# Lesson\n' > docs/wiki/lesson.md
+    if ./scripts/agent.sh validate VALIDATEKNOW; then echo "FAIL: validate accepted a knowledge-scope diff with no recorded transaction" >&2; exit 1; fi
+
+    # (3) A mismatched not_applicable (real diff present) still fails
+    # validate closed.
+    ./scripts/agent.sh knowledge-done VALIDATEKNOW not_applicable
+    if ./scripts/agent.sh validate VALIDATEKNOW; then echo "FAIL: validate accepted knowledge_state=not_applicable despite a real diff" >&2; exit 1; fi
+
+    # (4) The corrected, legitimate case: the knowledge transaction actually
+    # happened and is recorded KNOWLEDGE_DONE — validate now succeeds
+    # instead of re-rejecting the same diff DONE (below) will independently
+    # accept. Proven both before and after the real DONE handoff transition.
+    ./scripts/agent.sh knowledge-done VALIDATEKNOW KNOWLEDGE_DONE
+    ./scripts/agent.sh validate VALIDATEKNOW
+    ./scripts/agent.sh handoff VALIDATEKNOW DONE
+    ./scripts/agent.sh validate VALIDATEKNOW
+
+    # (5) Consistency still holds post-DONE: removing the only knowledge-
+    # scope diff while knowledge_state stays KNOWLEDGE_DONE fails validate
+    # closed (same zero-diff-but-claimed-complete rejection DONE and
+    # delivery-check both use).
+    rm -f docs/wiki/lesson.md
+    if ./scripts/agent.sh validate VALIDATEKNOW; then echo "FAIL: validate accepted KNOWLEDGE_DONE with zero knowledge-scope diffs" >&2; exit 1; fi)
+  echo 'agent validate knowledge-scope tests passed'
+}
+
+# Regression test for a real observed `scripts/wiki-lint.sh` bug: its
+# whole-vault scans (task-reference grep, duplicate-title find, wikilink
+# grep, and the per-page orphan-check grep) each re-scanned the script's
+# own previously-generated docs/wiki/lint-report.md, since only the
+# page-content loop's own `$pages` list excluded it by name — every other
+# scan walked `$wiki_root` directly. A prior run's own error-message text
+# (which quotes an offending token verbatim, e.g. a broken `[[slug]]` or a
+# bad `title:` line) could then itself look like real page content on the
+# *next* run: a stale false-positive error that never existed in any real
+# page, or a stale false-negative that hides a real orphan because the old
+# report happened to mention that page's slug somewhere. Proves, from a
+# clean, fully-valid vault (zero real broken links, zero real duplicate
+# titles, zero real bad task references) with a lint-report.md deliberately
+# pre-seeded to contain exactly those four kinds of stale, no-longer-real
+# findings: the fixed script reports zero errors and correctly still flags
+# the one real orphan page (not suppressed by the stale report's incidental
+# mention of its slug), on a clean run and unchanged on a second consecutive
+# run (idempotence — the report the first run just wrote must not itself
+# start poisoning the second).
+wiki_lint_self_scan_test() {
+  tmp=$(mktemp -d /tmp/deterministic-wikilintself.XXXXXX); trap 'rm -rf "$tmp"' EXIT
+  mkdir -p "$tmp/docs/wiki/decisions" "$tmp/scripts" "$tmp/.agents/runs/EXAMPLE-001"
+  cp "$root/scripts/wiki-lint.sh" "$tmp/scripts/"
+  printf '%s\n' '---' 'title: real-page' 'status: current' 'source: AGENTS.md' '---' '' 'A clean page with no links.' \
+    > "$tmp/docs/wiki/decisions/real-page.md"
+  printf '%s\n' '---' 'title: orphan-candidate' 'status: current' 'source: AGENTS.md' '---' '' 'A genuinely unlinked page.' \
+    > "$tmp/docs/wiki/decisions/orphan-candidate.md"
+  printf '# AGENTS\n' > "$tmp/AGENTS.md"
+  # Simulate a prior run's own stale report, quoting tokens that are not
+  # (or no longer) real: an already-fixed broken link, an already-fixed
+  # duplicate title, an already-fixed bad task reference, and an incidental
+  # mention of the real orphan page's own slug.
+  printf '%s\n' '# Wiki lint report' '' 'Generated by `scripts/wiki-lint.sh`.' '' '## Results' '' \
+    '- ERROR broken wikilink: `[[stale-broken-link]]`' \
+    '- ERROR duplicate title: `real-page`' \
+    '- ERROR nonexistent task reference: `EXAMPLE-999`' \
+    '- (superseded note, mentions [[orphan-candidate]] only in passing)' \
+    '' 'Errors: 3' 'Warnings: 0' \
+    > "$tmp/docs/wiki/lint-report.md"
+  (cd "$tmp"
+    if ! sh scripts/wiki-lint.sh > lint-output-1.txt 2>&1; then cat lint-output-1.txt >&2; echo "FAIL: wiki-lint reported an error on a fully clean vault (self-scan of stale lint-report.md)" >&2; exit 1; fi
+    grep -q '^wiki lint: 0 error(s), 2 warning(s)$' lint-output-1.txt || { cat lint-output-1.txt >&2; echo "FAIL: expected exactly 0 errors and 2 real orphan warnings (real-page + orphan-candidate), got a different count" >&2; exit 1; }
+    grep -Fq 'orphan-candidate.md' docs/wiki/lint-report.md || { cat docs/wiki/lint-report.md >&2; echo "FAIL: the genuinely unlinked orphan-candidate page was not flagged — its slug being incidentally mentioned in the stale prior report must not suppress a real orphan warning" >&2; exit 1; }
+    grep -Fq 'stale-broken-link' docs/wiki/lint-report.md && { cat docs/wiki/lint-report.md >&2; echo "FAIL: the stale prior report's own broken-wikilink text was re-detected as if it were real page content" >&2; exit 1; }
+    grep -Fq 'EXAMPLE-999' docs/wiki/lint-report.md && { cat docs/wiki/lint-report.md >&2; echo "FAIL: the stale prior report's own bad-task-reference text was re-detected as if it were real page content" >&2; exit 1; }
+
+    # Idempotence: the report this run just wrote (which itself now
+    # legitimately mentions "real-page.md" and "orphan-candidate.md" in its
+    # own orphan warnings) must not poison a second consecutive run either.
+    if ! sh scripts/wiki-lint.sh > lint-output-2.txt 2>&1; then cat lint-output-2.txt >&2; echo "FAIL: wiki-lint reported an error on the second consecutive run of an unchanged, fully clean vault" >&2; exit 1; fi
+    grep -q '^wiki lint: 0 error(s), 2 warning(s)$' lint-output-2.txt || { cat lint-output-2.txt >&2; echo "FAIL: second run's own freshly-generated report must not introduce new false errors" >&2; exit 1; })
+  echo 'wiki-lint self-scan regression test passed'
+}
+
 # Proves execution.topology: standalone — the complement of policy_test's
 # orchestrated case. The generic control plane does not know or care which
 # vendor is running as full_lifecycle here; this fixture is run twice under
@@ -1479,8 +1684,8 @@ command=${1:-}; case "$command" in
   knowledge-done) knowledge_done "${2:?usage: $0 knowledge-done <TASK-ID> [not_applicable]}" "${3:-KNOWLEDGE_DONE}" ;;
   publish-completion-report) publish_completion_report "${2:?usage: $0 publish-completion-report <TASK-ID> [ADAPTER]}" "${3:-markdown}" ;;
   verify-completion-report) verify_completion_report "${2:?usage: $0 verify-completion-report <TASK-ID>}" ;;
-  validate) id=${2:?usage: $0 validate <TASK-ID>}; require_run "$id"; dir=$(run_dir "$id"); for f in TASK.md EVIDENCE.md PLAN.md RUN.yaml review/code-review.md review/verification.md RESULT.md; do [ -f "$dir/$f" ] || fail "missing required artifact: $f"; done; if section_key_present "$dir" completion_report required; then [ -f "$dir/COMPLETION_REPORT.md" ] || fail "missing required artifact: COMPLETION_REPORT.md"; fi; validate_control_artifacts "$id"; scope_mappings "$dir/PLAN.md" >/dev/null; status=$(baseline_status "$dir"); if [ "$status" = captured ]; then validate_captured_baseline "$dir"; else historical_reference "$id" || fail "baseline missing or pending: $id"; fi; verify_freshness "$id"; verify_handoff "$id"; echo "run validated: $id" ;;
-  test) require_full_lifecycle; fixture_test; branch_test; policy_test; standalone_test; worker_evidence_write_failure_test; knowledge_scope_test; delivery_check_knowledge_scope_test ;;
+  validate) validate_run "${2:?usage: $0 validate <TASK-ID>}" ;;
+  test) require_full_lifecycle; fixture_test; branch_test; policy_test; standalone_test; worker_evidence_write_failure_test; knowledge_scope_test; delivery_check_knowledge_scope_test; validate_knowledge_scope_test; wiki_lint_self_scan_test ;;
   role-test) require_full_lifecycle; role_test ;;
   *) echo "usage: $0 {role|status|effective|baseline|branch|freeze|refreeze|verify-freeze|verify-scope|verify-knowledge-scope|freshness|handoff|verify-handoff|delivery-check|worker-evidence|verify-worker-evidence|knowledge-done|publish-completion-report|verify-completion-report|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
 esac

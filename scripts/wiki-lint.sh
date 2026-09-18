@@ -1,12 +1,28 @@
 #!/bin/sh
 set -eu
 
+# Invariant: this script's own generated $report (lint-report.md) is never
+# consumed as input to any lint category below. It lives under $wiki_root
+# and matches every `--include='*.md'`/`find ... -name '*.md'` glob used
+# to scan the vault, so every one of those whole-vault scans (not just the
+# page-content loop, which already excluded it via $report_name) must
+# explicitly exclude it by name too — otherwise a prior run's own error
+# text (which often quotes an offending token verbatim, e.g. a broken
+# `[[slug]]` or a bad `title:` line) can itself look like real page
+# content on the *next* run, producing a self-perpetuating false result
+# (a stale false-positive error, or a false-negative that hides a real
+# orphan) fed entirely by the tool's own prior output. Every grep/find
+# below that walks $wiki_root as a whole (as opposed to iterating the
+# already-filtered $pages list) must use $report_name as an exclusion, not
+# a broader page exclusion — this is a defect in what generated tooling
+# artifacts are, never a reason to exempt any real page.
 root=$(CDPATH= cd "$(dirname "$0")/.." && pwd)
 wiki_root=docs/wiki
 report=$wiki_root/lint-report.md
+report_name=$(basename "$report")
 tmp_file=/tmp/wiki-lint.$$
 trap 'rm -f "$tmp_file"' EXIT
-pages=$(find "$wiki_root" -type f -name '*.md' ! -name 'lint-report.md' | sort)
+pages=$(find "$wiki_root" -type f -name '*.md' ! -name "$report_name" | sort)
 names=$( { printf '%s\n' "$pages" | sed -E 's|.*/||; s|\.md$||'; echo lint-report; } | sort )
 errors=0
 warnings=0
@@ -46,7 +62,7 @@ for page in $pages; do
   fi
 done
 
-task_refs=$(grep -rhoE 'EXAMPLE-[0-9]{3}' "$wiki_root" --include='*.md' | sort -u || true)
+task_refs=$(grep -rhoE 'EXAMPLE-[0-9]{3}' "$wiki_root" --include='*.md' --exclude="$report_name" | sort -u || true)
 for task_ref in $task_refs; do
   if [ ! -d "$root/.agents/runs/$task_ref" ]; then
     echo "- ERROR nonexistent task reference: \`$task_ref\`" >> "$tmp_file"
@@ -54,13 +70,13 @@ for task_ref in $task_refs; do
   fi
 done
 
-duplicate_titles=$(find "$wiki_root" -type f -name '*.md' -exec sed -n 's/^title: //p' {} \; | sort | uniq -d)
+duplicate_titles=$(find "$wiki_root" -type f -name '*.md' ! -name "$report_name" -exec sed -n 's/^title: //p' {} \; | sort | uniq -d)
 if [ -n "$duplicate_titles" ]; then
   printf '%s\n' "$duplicate_titles" | sed 's/^/- ERROR duplicate title: `/' | sed 's/$/`/' >> "$tmp_file"
   errors=$((errors + 1))
 fi
 
-links=$(grep -rhoE '\[\[[^]|#]+\]\]' "$wiki_root" --include='*.md' | sed -E 's/^\[\[//; s/\]\]$//' | sort -u || true)
+links=$(grep -rhoE '\[\[[^]|#]+\]\]' "$wiki_root" --include='*.md' --exclude="$report_name" | sed -E 's/^\[\[//; s/\]\]$//' | sort -u || true)
 for link in $links; do
   if ! printf '%s\n' "$names" | grep -Fxq "$link"; then
     echo "- ERROR broken wikilink: \`[[$link]]\`" >> "$tmp_file"
@@ -71,7 +87,7 @@ done
 for page in $pages; do
   base=$(basename "$page" .md)
   case "$base" in CLAUDE|index|log|KNOWLEDGE-PIPELINE|README) continue ;; esac
-  if ! grep -RFql "[[$base]]" "$wiki_root" --include='*.md'; then
+  if ! grep -RFql "[[$base]]" "$wiki_root" --include='*.md' --exclude="$report_name"; then
     echo "- WARNING possible orphan page: \`$page\`" >> "$tmp_file"
     warnings=$((warnings + 1))
   fi
