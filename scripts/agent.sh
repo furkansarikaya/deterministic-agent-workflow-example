@@ -10,6 +10,14 @@ config_value() { sed -n "s/^$1: *//p" "$2" | head -n 1 | tr -d '"'; }
 fail() { echo "$*" >&2; return 1; }
 valid_role() { case "$execution_role" in full_lifecycle|implementation_worker) ;; *) fail "invalid execution role: $execution_role";; esac; }
 require_full_lifecycle() { [ "$execution_role" = full_lifecycle ] || fail "command denied for implementation_worker"; }
+# Mirror of require_full_lifecycle: some operations (recording worker evidence) are only
+# meaningful, and only authorized, when performed by a process actually running with
+# AGENT_ROLE=implementation_worker. This cannot prove the calling process was genuinely
+# Codex rather than a full_lifecycle session that merely exported the same env var (see
+# .agents/ENFORCEMENT.md "Evidence strength" — role identity remains declared, not
+# cryptographically proven); the optional Codex-session cross-check in
+# verify_worker_evidence narrows, but does not close, that residual gap.
+require_implementation_worker() { [ "$execution_role" = implementation_worker ] || fail "command requires AGENT_ROLE=implementation_worker"; }
 
 valid_task_id() { case "$1" in *[!A-Za-z0-9_-]*|'') return 1;; esac; }
 
@@ -216,7 +224,7 @@ record_handoff() {
   id=$1 phase=$2; require_run "$id"; dir=$(run_dir "$id")
   enforce_task_branch "$id"
   verify_freshness "$id"; verify_scope "$id"
-  case "$phase" in IMPLEMENTING|VERIFIED|REVIEWED|CODE_DONE) ;; *) fail "invalid handoff phase";; esac
+  case "$phase" in IMPLEMENTING|VERIFIED|REVIEWED|CODE_DONE|DONE) ;; *) fail "invalid handoff phase";; esac
   patch=$(task_patch_fingerprint "$id")
   current=$(section_value "$dir" handoff state)
   case "$phase" in
@@ -228,6 +236,14 @@ record_handoff() {
         REVIEWED) [ "$(section_value "$dir" handoff verification_patch_sha256)" != "$patch" ] || fail "illegal handoff transition: $current -> $phase" ;;
         *) fail "illegal handoff transition: $current -> $phase" ;;
       esac
+      # Lifecycle advancement out of IMPLEMENT must be backed by auditable
+      # implementation_worker evidence (or a validated TDD exemption) for
+      # every non-exempt behavior-changing scope path — this is the concrete
+      # mechanism preventing a full_lifecycle session from silently
+      # implementing application code itself and then advancing the state
+      # machine as though delegation occurred. No-op for a pre-hardening run
+      # (see policy_enforced) or a historical reference.
+      verify_worker_evidence "$id"
       replace_section_value "$dir" handoff verification_patch_sha256 "$patch" "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml"
       replace_section_value "$dir" handoff review_patch_sha256 PENDING "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml"
       replace_section_value "$dir" handoff code_done_patch_sha256 PENDING "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml" ;;
@@ -241,6 +257,14 @@ record_handoff() {
       [ "$(section_value "$dir" handoff verification_patch_sha256)" = "$patch" ] || fail "CODE_DONE blocked: verification stale or missing"
       [ "$(section_value "$dir" handoff review_patch_sha256)" = "$patch" ] || fail "CODE_DONE blocked: review stale or missing"
       replace_section_value "$dir" handoff code_done_patch_sha256 "$patch" "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml" ;;
+    DONE)
+      case "$current" in CODE_DONE|DONE) ;; *) fail "illegal handoff transition: $current -> $phase";; esac
+      [ "$(section_value "$dir" handoff code_done_patch_sha256)" = "$patch" ] || fail "DONE blocked: CODE_DONE stale or missing"
+      section_key_present "$dir" completion_report required && {
+        ks=$(section_value "$dir" execution knowledge_state)
+        case "$ks" in KNOWLEDGE_DONE|not_applicable) ;; *) fail "DONE blocked: knowledge transaction not recorded complete (see 'agent.sh knowledge-done')" ;; esac
+        verify_completion_report "$id"
+      } ;;
   esac
   tmp=$dir/RUN.yaml.tmp; replace_section_value "$dir" handoff state "$phase" "$tmp" && mv "$tmp" "$dir/RUN.yaml"
   if [ "$phase" = CODE_DONE ]; then replace_section_value "$dir" execution state CODE_DONE "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml"; fi
@@ -274,9 +298,21 @@ delivery_check() {
 known_control_artifact() {
   id=$1 path=$2
   case "$path" in
-    ".agents/runs/$id/TASK.md"|".agents/runs/$id/EVIDENCE.md"|".agents/runs/$id/PLAN.md"|".agents/runs/$id/RUN.yaml"|".agents/runs/$id/RESULT.md"|".agents/runs/$id/review/code-review.md"|".agents/runs/$id/review/verification.md"|".agents/runs/$id/amendments/"*) return 0 ;;
-    *) return 1 ;;
+    ".agents/runs/$id/TASK.md"|".agents/runs/$id/EVIDENCE.md"|".agents/runs/$id/PLAN.md"|".agents/runs/$id/RUN.yaml"|".agents/runs/$id/RESULT.md"|".agents/runs/$id/COMPLETION_REPORT.md"|".agents/runs/$id/review/code-review.md"|".agents/runs/$id/review/verification.md"|".agents/runs/$id/amendments/"*|".agents/runs/$id/worker-evidence/"*) return 0 ;;
   esac
+  # A published completion report legitimately (and only then) mutates the
+  # task's own task_source.path via a task-integration adapter — see
+  # publish_completion_report. That single, narrowly-scoped, full_lifecycle-
+  # only write is treated as control metadata, exactly like this run's own
+  # RESULT.md, rather than application scope drift. Before publication this
+  # exemption does not apply, so an unrelated mid-IMPLEMENT edit to the task
+  # source file is still correctly flagged.
+  rundir=$(run_dir "$id")
+  if [ "$(section_value "$rundir" completion_report published)" = true ]; then
+    source_path=$(section_value "$rundir" task_source path)
+    [ -n "$source_path" ] && [ "$path" = "$source_path" ] && return 0
+  fi
+  return 1
 }
 validate_control_artifacts() {
   id=$1 dir=$(run_dir "$id") bad=''
@@ -291,6 +327,253 @@ $(find "$dir" -type l -print)
 EOF
   [ -z "$bad" ] || { echo "unexpected run artifact:" >&2; printf '%b' "$bad" >&2; return 1; }
 }
+# ---------------------------------------------------------------------------
+# Worker-evidence, TDD, and completion-report enforcement (policy-gated).
+#
+# A run is subject to this policy only when its RUN.yaml contains the
+# `worker_evidence:` key block, exactly mirroring how `repository.task_branch`
+# gates branch-isolation policy: a run created before this policy existed
+# (EXAMPLE-001, and any run frozen before this change) has no such key, is
+# never retroactively rewritten to add one, and is therefore exempt — see
+# `historical_reference` / `enforce_task_branch` for the established pattern
+# this reuses. A new run's template includes the key going forward.
+# ---------------------------------------------------------------------------
+policy_enforced() { section_key_present "$1" worker_evidence required; }
+
+# A small denylist of non-answers. This cannot judge whether a justification
+# is semantically correct (that remains a human/reviewer judgment, recorded
+# in review/code-review.md — see the RED-VALIDATED convention below); it only
+# rejects the specific empty phrases the task explicitly called out, plus an
+# unconditional minimum length so a single word cannot pass either.
+reject_generic_justification() {
+  text=$1
+  norm=$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:space:]]+/ /g')
+  case "$norm" in
+    ''|'tdd not needed'|'test not needed'|'no test needed'|'not needed'|'configuration change'|'n/a'|'na') return 1 ;;
+  esac
+  [ "${#norm}" -ge 20 ] || return 1
+  return 0
+}
+
+worker_evidence_dir() { printf '%s/worker-evidence\n' "$(run_dir "$1")"; }
+next_evidence_seq() {
+  dir=$1 phase=$2 n=0
+  for f in "$dir"/"$phase"-*.yaml; do
+    [ -e "$f" ] || continue
+    seq=$(basename "$f" .yaml); seq=${seq#"$phase"-}
+    case "$seq" in *[!0-9]*|'') continue ;; esac
+    [ "$seq" -gt "$n" ] && n=$seq
+  done
+  printf '%d\n' $((n + 1))
+}
+evidence_field() { sed -n "s/^$2: *//p" "$1" | head -1 | tr -d '"'; }
+evidence_targets() { sed -n 's/^target: *//p' "$1" | head -1 | tr ',' '\n'; }
+evidence_covers_path() { evidence_targets "$1" | grep -Fxq "$2"; }
+
+# Records one worker-evidence file for the active run's current IMPLEMENTING
+# phase. Only callable by implementation_worker, only while the run's own
+# frozen plan/evidence/task hashes are the ones this file records against —
+# a later refreeze (amendment) makes every prior evidence file stale for
+# verify_worker_evidence even though the files themselves are never deleted
+# or rewritten (append-only audit trail).
+#
+# Reads structured fields from stdin as `key: value` lines: command, target
+# (comma-separated scope paths), and, for phase=RED only, expected_failure.
+record_worker_evidence() {
+  id=$1 phase=$2 result=$3; require_run "$id"; dir=$(run_dir "$id")
+  require_implementation_worker
+  case "$phase" in RED|GREEN|REFACTOR|FIX) ;; *) fail "invalid worker-evidence phase: $phase" ;; esac
+  case "$result" in pass|fail) ;; *) fail "invalid worker-evidence result: $result (want pass|fail)" ;; esac
+  [ "$(section_value "$dir" handoff state)" = IMPLEMENTING ] || fail "worker evidence may only be recorded while handoff state is IMPLEMENTING"
+  verify_freeze "$id"
+  enforce_task_branch "$id"
+  scratch=$(mktemp "${TMPDIR:-/tmp}/agent-worker-evidence.XXXXXX"); cat > "$scratch"
+  command_text=$(sed -n 's/^command: *//p' "$scratch" | head -1)
+  target_text=$(sed -n 's/^target: *//p' "$scratch" | head -1)
+  expected_failure=$(sed -n 's/^expected_failure: *//p' "$scratch" | head -1)
+  [ -n "$command_text" ] || { rm -f "$scratch"; fail "worker evidence requires a non-empty command"; }
+  [ -n "$target_text" ] || { rm -f "$scratch"; fail "worker evidence requires a non-empty target (comma-separated scope paths)"; }
+  mappings=$(scope_mappings "$dir/PLAN.md") || { rm -f "$scratch"; fail "invalid scope mapping"; }
+  printf '%s\n' "$target_text" | tr ',' '\n' | while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    authorized_path "$mappings" "$p" || { echo "worker evidence targets a path outside frozen scope: $p" >&2; exit 1; }
+  done || { rm -f "$scratch"; fail "worker evidence rejected: out-of-scope target"; }
+  if [ "$phase" = RED ]; then
+    [ "$result" = fail ] || { rm -f "$scratch"; fail "RED evidence must record result: fail"; }
+    reject_generic_justification "$expected_failure" || { rm -f "$scratch"; fail "RED evidence requires a specific, non-generic expected_failure (>=20 chars, not a stock phrase)"; }
+  else
+    [ "$result" = pass ] || { rm -f "$scratch"; fail "$phase evidence must record result: pass"; }
+  fi
+  evdir=$(worker_evidence_dir "$id"); mkdir -p "$evdir"
+  seq=$(next_evidence_seq "$evdir" "$phase")
+  out="$evdir/$phase-$seq.yaml"
+  {
+    printf 'task_id: "%s"\n' "$id"
+    printf 'phase: "%s"\n' "$phase"
+    printf 'result: "%s"\n' "$result"
+    printf 'role: "%s"\n' "$execution_role"
+    printf 'command: %s\n' "$command_text"
+    printf 'target: %s\n' "$target_text"
+    [ "$phase" = RED ] && printf 'expected_failure: %s\n' "$expected_failure"
+    printf 'base_sha: "%s"\n' "$(git -C "$root" rev-parse HEAD)"
+    printf 'task_sha256: "%s"\n' "$(section_value "$dir" freeze task_sha256)"
+    printf 'evidence_sha256: "%s"\n' "$(section_value "$dir" freeze evidence_sha256)"
+    printf 'plan_sha256: "%s"\n' "$(section_value "$dir" freeze plan_sha256)"
+    [ -n "${CODEX_SESSION_ID:-}" ] && printf 'codex_session_id: "%s"\n' "$CODEX_SESSION_ID"
+    printf 'timestamp: "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$out"
+  rm -f "$scratch"
+  echo "worker evidence recorded: $id $phase-$seq ($result)"
+}
+
+# Structural, task/freeze-bound validity of one evidence file: current role
+# claim aside (see require_implementation_worker's caveat), this checks
+# everything a script legitimately can — it belongs to this task, it was
+# recorded against the exact plan/evidence/task hashes currently frozen (a
+# stale or cross-task file fails), and, when a local Codex session log
+# directory is discoverable, an optional cross-check that the referenced
+# Codex session actually exists and ran against this repository.
+valid_evidence_file() {
+  id=$1 dir=$2 file=$3
+  [ "$(evidence_field "$file" task_id)" = "$id" ] || return 1
+  [ "$(evidence_field "$file" task_sha256)" = "$(section_value "$dir" freeze task_sha256)" ] || return 1
+  [ "$(evidence_field "$file" evidence_sha256)" = "$(section_value "$dir" freeze evidence_sha256)" ] || return 1
+  [ "$(evidence_field "$file" plan_sha256)" = "$(section_value "$dir" freeze plan_sha256)" ] || return 1
+  [ "$(evidence_field "$file" role)" = implementation_worker ] || return 1
+  session=$(evidence_field "$file" codex_session_id)
+  if [ -n "$session" ] && [ -d "${CODEX_SESSION_DIR:-$HOME/.codex/sessions}" ]; then
+    grep -RFl "\"$session\"" "${CODEX_SESSION_DIR:-$HOME/.codex/sessions}" >/dev/null 2>&1 || return 1
+  fi
+  return 0
+}
+
+parse_tdd_exemptions() {
+  awk '
+    /^scope:$/ { inside=1; next } inside && /^---$/ { exit }
+    inside && /^  - path: / { path=$0; sub(/^  - path: /, "", path); exemption=""; next }
+    inside && /^    tdd_exemption: / { e=$0; sub(/^    tdd_exemption: /, "", e); exemption=e; print path "|" exemption }
+  ' "$1"
+}
+exempted_path() { parse_tdd_exemptions "$1" | grep -F "$2|" | head -1 | cut -d '|' -f2-; }
+validate_tdd_exemptions() {
+  dir=$1; mappings=$(scope_mappings "$dir/PLAN.md") || fail "invalid scope mapping"
+  printf '%s\n' "$mappings" | cut -d '|' -f1 | while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    reason=$(exempted_path "$dir/PLAN.md" "$path")
+    [ -n "$reason" ] || continue
+    reject_generic_justification "$reason" && continue
+    echo "invalid TDD exemption for $path: reason is missing or too generic" >&2
+    exit 1
+  done || fail "TDD exemption validation failed"
+}
+
+# The verification gate for behavior-changing scope: every frozen scope path
+# without a tdd_exemption must have at least one valid RED (result=fail) and
+# at least one valid GREEN-or-FIX (result=pass) worker-evidence file naming
+# it, both bound to the currently frozen plan/evidence/task hashes. A path
+# carrying a validated tdd_exemption needs neither. Skips entirely for a run
+# not subject to this policy (see policy_enforced) or a historical reference.
+verify_worker_evidence() {
+  id=$1; require_run "$id"; dir=$(run_dir "$id")
+  historical_reference "$id" && { echo "worker-evidence historical reference: $id"; return 0; }
+  policy_enforced "$dir" || { echo "worker-evidence not policy-enforced for $id (pre-hardening run)"; return 0; }
+  verify_freeze "$id"
+  validate_tdd_exemptions "$dir"
+  evdir=$(worker_evidence_dir "$id")
+  mappings=$(scope_mappings "$dir/PLAN.md") || fail "invalid scope mapping"
+  missing_tmp=$(mktemp "${TMPDIR:-/tmp}/agent-missing-evidence.XXXXXX")
+  printf '%s\n' "$mappings" | cut -d '|' -f1 | while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    reason=$(exempted_path "$dir/PLAN.md" "$path"); [ -n "$reason" ] && continue
+    red_ok=0 green_ok=0
+    if [ -d "$evdir" ]; then
+      for f in "$evdir"/RED-*.yaml; do
+        [ -e "$f" ] || continue
+        evidence_covers_path "$f" "$path" || continue
+        valid_evidence_file "$id" "$dir" "$f" && red_ok=1
+      done
+      for f in "$evdir"/GREEN-*.yaml "$evdir"/FIX-*.yaml; do
+        [ -e "$f" ] || continue
+        evidence_covers_path "$f" "$path" || continue
+        valid_evidence_file "$id" "$dir" "$f" && green_ok=1
+      done
+    fi
+    if [ "$red_ok" != 1 ] || [ "$green_ok" != 1 ]; then printf '%s\n' "$path" >> "$missing_tmp"; fi
+  done
+  missing=$(cat "$missing_tmp"); rm -f "$missing_tmp"
+  [ -z "$missing" ] || { echo "missing valid RED+GREEN worker evidence (or TDD exemption) for:" >&2; printf '%s\n' "$missing" >&2; fail "worker-evidence verification failed: $id"; }
+  echo "worker-evidence verified: $id"
+}
+
+# --- Task Completion Report (task-system agnostic) -------------------------
+#
+# agent.sh never talks to a specific task tracker. It only (a) checks the
+# report's minimum structure, (b) delegates publish/verify to a pluggable
+# adapter script under .agents/task-integrations/<name>.sh implementing
+# `publish <TASK-ID> <report-file>` (prints a receipt to stdout) and
+# `verify <TASK-ID> <receipt>` (exit 0 iff still present/correct there), and
+# (c) records the adapter name + receipt in RUN.yaml. What "publish" means —
+# append to a Markdown task file, comment on an issue, etc. — is entirely the
+# adapter's concern.
+required_report_headings() {
+  dir=$1
+  printf '## Implementation Summary\n## Verification\n## Review Result\n## Known Limitations / Follow-up\n'
+  [ -d "$(worker_evidence_dir "$(basename "$dir")")" ] && printf '## TDD Evidence\n'
+  [ -d "$dir/amendments" ] && [ -n "$(ls -A "$dir/amendments" 2>/dev/null)" ] && printf '## Amendments\n'
+}
+validate_completion_report_structure() {
+  id=$1 dir=$(run_dir "$1"); report="$dir/COMPLETION_REPORT.md"
+  [ -f "$report" ] || fail "completion report missing: $report"
+  size=$(wc -c < "$report" | tr -d ' '); [ "$size" -ge 200 ] || fail "completion report is too short to be meaningful"
+  required_report_headings "$dir" | while IFS= read -r heading; do
+    [ -n "$heading" ] || continue
+    grep -Fq "$heading" "$report" || { echo "completion report missing required section: $heading" >&2; exit 1; }
+  done || fail "completion report structure invalid: $id"
+}
+adapter_script() {
+  name=$1; path="$root/.agents/task-integrations/$name.sh"
+  [ -f "$path" ] || fail "unknown task-integration adapter: $name"
+  printf '%s\n' "$path"
+}
+publish_completion_report() {
+  id=$1 adapter=${2:-markdown}; require_run "$id"; dir=$(run_dir "$id"); require_full_lifecycle
+  [ "$(run_state "$dir")" = CODE_DONE ] || fail "completion report may only be published after CODE_DONE"
+  validate_completion_report_structure "$id"
+  script=$(adapter_script "$adapter") || return 1
+  receipt=$("$script" publish "$id" "$dir/COMPLETION_REPORT.md") || fail "completion report publish failed via adapter: $adapter"
+  [ -n "$receipt" ] || fail "adapter $adapter returned an empty receipt"
+  tmp=$dir/RUN.yaml.tmp
+  replace_section_value "$dir" completion_report adapter "$adapter" "$tmp" && mv "$tmp" "$dir/RUN.yaml"
+  replace_section_value "$dir" completion_report published true "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml"
+  replace_section_value "$dir" completion_report receipt "$receipt" "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml"
+  # An adapter (e.g. markdown.sh) may append the report into the task's own
+  # task_source.path file, changing its hash. That specific, narrowly-scoped
+  # write is this command's own authorized effect (never a scope drift being
+  # masked), so the recorded freshness revision is refreshed to match it —
+  # otherwise every later handoff call's unconditional verify_freshness
+  # would wrongly report the plan as stale for a run that is already
+  # CODE_DONE and has nothing left to re-plan.
+  set_task_source_revision "$dir"
+  echo "completion report published: $id via $adapter -> $receipt"
+}
+verify_completion_report() {
+  id=$1; require_run "$id"; dir=$(run_dir "$id")
+  [ "$(section_value "$dir" completion_report published)" = true ] || fail "completion report not published: $id"
+  adapter=$(section_value "$dir" completion_report adapter); receipt=$(section_value "$dir" completion_report receipt)
+  [ -n "$adapter" ] && [ -n "$receipt" ] || fail "completion report adapter/receipt missing: $id"
+  script=$(adapter_script "$adapter") || return 1
+  "$script" verify "$id" "$receipt" || fail "completion report publication could not be verified: $id"
+  echo "completion report publication verified: $id"
+}
+knowledge_done() {
+  id=$1 state=${2:-KNOWLEDGE_DONE}; require_run "$id"; dir=$(run_dir "$id"); require_full_lifecycle
+  case "$state" in KNOWLEDGE_DONE|not_applicable) ;; *) fail "invalid knowledge state: $state" ;; esac
+  [ "$(run_state "$dir")" = CODE_DONE ] || fail "knowledge-done requires CODE_DONE first"
+  section_key_present "$dir" execution knowledge_state || fail "run schema has no execution.knowledge_state field to set (pre-hardening run)"
+  tmp=$dir/RUN.yaml.tmp; replace_section_value "$dir" execution knowledge_state "$state" "$tmp" && mv "$tmp" "$dir/RUN.yaml"
+  echo "knowledge state recorded: $id $state"
+}
+
 validate_captured_baseline() {
   dir=$1 sha=$(repository_base_sha "$dir")
   case "$sha" in ''|PENDING|*'<'*|*[!0-9a-f]*) fail "invalid repository.base_sha";; esac
@@ -431,6 +714,144 @@ role_test() {
   echo 'agent role tests passed'
 }
 
+# Proves the worker-evidence / TDD / completion-report enforcement added on
+# top of the base state machine: a full_lifecycle session cannot silently
+# implement application code and advance past IMPLEMENT (the concrete KW-002
+# bypass), evidence is bound to the current task/freeze (stale and
+# cross-task evidence are rejected), a worker cannot record evidence for an
+# out-of-scope path, a validated TDD exemption substitutes for RED/GREEN,
+# and DONE requires a published, independently-verifiable completion report
+# plus a recorded knowledge-transaction state — never the other way around.
+policy_test() {
+  tmp=$(mktemp -d /tmp/deterministic-policy.XXXXXX); trap 'rm -rf "$tmp"' EXIT
+  mkdir -p "$tmp/.agents/runs/POLICY/review" "$tmp/.agents/modes" "$tmp/.agents/task-integrations" "$tmp/scripts" "$tmp/tasks"
+  cp "$root/scripts/agent.sh" "$tmp/scripts/"; cp "$root/.agents/config.yaml" "$tmp/.agents/"; cp "$root/.agents/modes/"*.yaml "$tmp/.agents/modes/"
+  cp "$root/.agents/task-integrations/markdown.sh" "$tmp/.agents/task-integrations/"; chmod +x "$tmp/.agents/task-integrations/markdown.sh"
+  printf 'POLICY\n' > "$tmp/.agents/ACTIVE_RUN"
+  printf '# Task: POLICY\n\n## Acceptance criteria\n\n- AC-1: impl.txt behavior\n- AC-2: config.txt constant\n' > "$tmp/.agents/runs/POLICY/TASK.md"
+  printf '# Evidence\n' > "$tmp/.agents/runs/POLICY/EVIDENCE.md"
+  printf '%s\n' '---' 'scope:' \
+    '  - path: impl.txt' '    criteria: [AC-1]' \
+    '  - path: config.txt' '    criteria: [AC-2]' \
+    '    tdd_exemption: "control-plane configuration constant with no executable behavior to test"' \
+    '---' '# Plan' > "$tmp/.agents/runs/POLICY/PLAN.md"
+  printf '%s\n' 'repository:' '  base_sha: PENDING' 'task_source:' '  type: local_markdown' '  path: tasks/POLICY.md' '  revision: PENDING' \
+    'execution:' '  mode: deterministic' '  profile: core' '  state: PLANNING' '  knowledge_state: not_started' \
+    'freeze:' '  task_sha256: PENDING' '  evidence_sha256: PENDING' '  plan_sha256: PENDING' '  policy_sha256: PENDING' \
+    'baseline:' '  status: pending' \
+    'handoff:' '  state: PLANNED' '  verification_patch_sha256: PENDING' '  review_patch_sha256: PENDING' '  code_done_patch_sha256: PENDING' \
+    'worker_evidence:' '  required: true' 'tdd:' '  required: true' \
+    'completion_report:' '  required: true' '  adapter: PENDING' '  published: false' '  receipt: PENDING' \
+    > "$tmp/.agents/runs/POLICY/RUN.yaml"
+  printf '# review\n' > "$tmp/.agents/runs/POLICY/review/code-review.md"; printf '# verification\n' > "$tmp/.agents/runs/POLICY/review/verification.md"; printf '# result\n' > "$tmp/.agents/runs/POLICY/RESULT.md"
+  (cd "$tmp"; git init -q; git config user.email policy@example.invalid; git config user.name fixture
+    printf '# POLICY task\n' > tasks/POLICY.md; : > impl.txt; : > config.txt
+    git add -- .agents scripts tasks impl.txt config.txt; git commit -qm baseline
+
+    ./scripts/agent.sh baseline POLICY
+    printf 'discovered\n' >> .agents/runs/POLICY/EVIDENCE.md
+    printf 'planned\n' >> .agents/runs/POLICY/PLAN.md
+    ./scripts/agent.sh freeze POLICY
+    ./scripts/agent.sh handoff POLICY IMPLEMENTING
+
+    # A full_lifecycle session implements the change directly (exactly the
+    # KW-002 pattern) and then tries to advance the lifecycle as though
+    # delegation had occurred. This must be rejected: no worker evidence
+    # exists yet for either scope path.
+    printf 'implemented directly by full_lifecycle\n' > impl.txt
+    if ./scripts/agent.sh handoff POLICY VERIFIED; then echo "FAIL: full_lifecycle bypass was not rejected" >&2; exit 1; fi
+    git checkout -q -- impl.txt
+
+    # Recording worker evidence is worker-only.
+    if printf 'command: go test ./...\ntarget: impl.txt\n' | ./scripts/agent.sh worker-evidence POLICY GREEN pass; then
+      echo "FAIL: full_lifecycle was allowed to record worker evidence" >&2; exit 1
+    fi
+
+    # A worker cannot claim evidence for a path outside frozen scope.
+    if printf 'command: go test ./...\ntarget: out-of-scope.txt\n' | AGENT_ROLE=implementation_worker ./scripts/agent.sh worker-evidence POLICY GREEN pass; then
+      echo "FAIL: out-of-scope worker evidence was accepted" >&2; exit 1
+    fi
+
+    # GREEN with result=fail is invalid; RED with result=pass is invalid;
+    # RED with a generic/too-short expected_failure is invalid.
+    if printf 'command: go test ./...\ntarget: impl.txt\n' | AGENT_ROLE=implementation_worker ./scripts/agent.sh worker-evidence POLICY GREEN fail; then exit 1; fi
+    if printf 'command: go test ./...\ntarget: impl.txt\nexpected_failure: irrelevant\n' | AGENT_ROLE=implementation_worker ./scripts/agent.sh worker-evidence POLICY RED pass; then exit 1; fi
+    if printf 'command: go test ./...\ntarget: impl.txt\nexpected_failure: configuration change\n' | AGENT_ROLE=implementation_worker ./scripts/agent.sh worker-evidence POLICY RED fail; then exit 1; fi
+
+    # GREEN recorded before any RED exists is not sufficient on its own.
+    AGENT_ROLE=implementation_worker sh -c "printf 'command: go test ./... -run TestImpl\ntarget: impl.txt\n' | ./scripts/agent.sh worker-evidence POLICY GREEN pass"
+    if ./scripts/agent.sh handoff POLICY VERIFIED; then echo "FAIL: VERIFIED allowed with GREEN but no valid RED" >&2; exit 1; fi
+
+    # A genuine RED (fails for a specific, named behavioral reason) plus the
+    # GREEN already recorded above now satisfies impl.txt; config.txt is
+    # covered by its validated tdd_exemption. VERIFIED must now succeed.
+    AGENT_ROLE=implementation_worker sh -c "printf 'command: go test ./... -run TestImpl\ntarget: impl.txt\nexpected_failure: TestImpl fails: registry returns zero tasks before the new lookup method exists\n' | ./scripts/agent.sh worker-evidence POLICY RED fail"
+    ./scripts/agent.sh handoff POLICY VERIFIED
+
+    # Stale evidence rejection (distinct from cross-task rejection below): an
+    # evidence file whose recorded plan_sha256 no longer matches the run's
+    # currently frozen plan (as a refreeze/amendment would cause) must stop
+    # counting, even though it still belongs to this exact task.
+    cp .agents/runs/POLICY/worker-evidence/GREEN-1.yaml .agents/runs/POLICY/worker-evidence/GREEN-1.yaml.bak
+    sed -i.tmp 's/^plan_sha256: .*/plan_sha256: "0000000000000000000000000000000000000000000000000000000000000000"/' .agents/runs/POLICY/worker-evidence/GREEN-1.yaml
+    rm -f .agents/runs/POLICY/worker-evidence/GREEN-1.yaml.tmp
+    if ./scripts/agent.sh verify-worker-evidence POLICY; then echo "FAIL: staled (plan_sha256-mismatched) evidence still counted" >&2; exit 1; fi
+    mv .agents/runs/POLICY/worker-evidence/GREEN-1.yaml.bak .agents/runs/POLICY/worker-evidence/GREEN-1.yaml
+    ./scripts/agent.sh verify-worker-evidence POLICY
+
+    ./scripts/agent.sh handoff POLICY REVIEWED
+    ./scripts/agent.sh handoff POLICY CODE_DONE
+
+    # Completion report gating: DONE is unreachable before it is published,
+    # unreachable before knowledge state is recorded, and the markdown
+    # adapter's receipt genuinely round-trips against the task source file.
+    if ./scripts/agent.sh handoff POLICY DONE; then echo "FAIL: DONE allowed before completion report" >&2; exit 1; fi
+    if ./scripts/agent.sh publish-completion-report POLICY markdown; then echo "FAIL: publish allowed before a report file exists" >&2; exit 1; fi
+    printf '%s\n' '# Completion Report: POLICY' '' '## Implementation Summary' 'impl.txt gained Find(); config.txt is a constant, TDD-exempt.' '' \
+      '## TDD Evidence' 'RED: TestImpl failed for the expected reason; GREEN: passed after implementation.' '' \
+      '## Verification' 'go test ./... passed.' '' '## Review Result' 'Approved.' '' '## Known Limitations / Follow-up' 'None.' \
+      > .agents/runs/POLICY/COMPLETION_REPORT.md
+    if ./scripts/agent.sh handoff POLICY DONE; then echo "FAIL: DONE allowed before publication" >&2; exit 1; fi
+    ./scripts/agent.sh publish-completion-report POLICY markdown
+    grep -Fq 'COMPLETION-REPORT:BEGIN:POLICY' tasks/POLICY.md
+    if ./scripts/agent.sh handoff POLICY DONE; then echo "FAIL: DONE allowed before knowledge-done" >&2; exit 1; fi
+    ./scripts/agent.sh knowledge-done POLICY not_applicable
+    ./scripts/agent.sh verify-completion-report POLICY
+    ./scripts/agent.sh handoff POLICY DONE
+
+    # Tamper detection: editing the published section invalidates the
+    # receipt even though the adapter's own file otherwise looks intact.
+    sed -i.bak 's/impl.txt gained.*/tampered/' tasks/POLICY.md; rm -f tasks/POLICY.bak
+    if ./scripts/agent.sh verify-completion-report POLICY; then echo "FAIL: tampered completion-report section still verified" >&2; exit 1; fi
+    git checkout -q -- tasks/POLICY.md
+
+    # Stale/cross-task evidence rejection, via a second run (POLICY2) reusing
+    # a copy of POLICY's already-recorded (and now differently-frozen)
+    # GREEN evidence file: its embedded task_id/hashes belong to POLICY, not
+    # POLICY2, so it must never count toward POLICY2's own requirement.
+    mkdir -p .agents/runs/POLICY2/review
+    printf '# Task: POLICY2\n' > .agents/runs/POLICY2/TASK.md; printf '# Evidence\n' > .agents/runs/POLICY2/EVIDENCE.md
+    printf '%s\n' '---' 'scope:' '  - path: impl.txt' '    criteria: [AC-1]' '---' '# Plan' > .agents/runs/POLICY2/PLAN.md
+    printf '%s\n' 'repository:' '  base_sha: PENDING' 'task_source:' '  type: local_markdown' '  path: tasks/POLICY.md' '  revision: PENDING' \
+      'execution:' '  mode: deterministic' '  profile: core' '  state: PLANNING' '  knowledge_state: not_started' \
+      'freeze:' '  task_sha256: PENDING' '  evidence_sha256: PENDING' '  plan_sha256: PENDING' '  policy_sha256: PENDING' \
+      'baseline:' '  status: pending' \
+      'handoff:' '  state: PLANNED' '  verification_patch_sha256: PENDING' '  review_patch_sha256: PENDING' '  code_done_patch_sha256: PENDING' \
+      'worker_evidence:' '  required: true' 'tdd:' '  required: true' \
+      'completion_report:' '  required: true' '  adapter: PENDING' '  published: false' '  receipt: PENDING' \
+      > .agents/runs/POLICY2/RUN.yaml
+    printf '# review\n' > .agents/runs/POLICY2/review/code-review.md; printf '# verification\n' > .agents/runs/POLICY2/review/verification.md; printf '# result\n' > .agents/runs/POLICY2/RESULT.md
+    printf 'POLICY2\n' > .agents/ACTIVE_RUN
+    ./scripts/agent.sh baseline POLICY2; printf 'discovered\n' >> .agents/runs/POLICY2/EVIDENCE.md; printf 'planned\n' >> .agents/runs/POLICY2/PLAN.md; ./scripts/agent.sh freeze POLICY2
+    ./scripts/agent.sh handoff POLICY2 IMPLEMENTING
+    mkdir -p .agents/runs/POLICY2/worker-evidence
+    cp .agents/runs/POLICY/worker-evidence/GREEN-1.yaml .agents/runs/POLICY2/worker-evidence/GREEN-1.yaml
+    cp .agents/runs/POLICY/worker-evidence/RED-1.yaml .agents/runs/POLICY2/worker-evidence/RED-1.yaml
+    if ./scripts/agent.sh handoff POLICY2 VERIFIED; then echo "FAIL: cross-task evidence (wrong task_id/hashes) was accepted" >&2; exit 1; fi
+    printf 'POLICY\n' > .agents/ACTIVE_RUN)
+  echo 'agent policy tests passed'
+}
+
 # Deterministic per-task branch isolation. A run whose RUN.yaml has no repository.task_branch
 # key (like FIX/ROLE above, and like the real EXAMPLE-001) is untouched by any of this —
 # proven by reusing those exact fixtures unmodified. BRANCH below is new-style: it must
@@ -511,8 +932,13 @@ command=${1:-}; case "$command" in
   handoff) [ "$execution_role" = full_lifecycle ] || [ "${3:-}" = IMPLEMENTING ] || fail "handoff phase denied for implementation_worker"; record_handoff "${2:?usage: $0 handoff <TASK-ID> <PHASE>}" "${3:?usage: $0 handoff <TASK-ID> <PHASE>}" ;;
   verify-handoff) verify_handoff "${2:?usage: $0 verify-handoff <TASK-ID>}" ;;
   delivery-check) require_full_lifecycle; delivery_check "${2:?usage: $0 delivery-check <TASK-ID>}" ;;
-  validate) id=${2:?usage: $0 validate <TASK-ID>}; require_run "$id"; dir=$(run_dir "$id"); for f in TASK.md EVIDENCE.md PLAN.md RUN.yaml review/code-review.md review/verification.md RESULT.md; do [ -f "$dir/$f" ] || fail "missing required artifact: $f"; done; validate_control_artifacts "$id"; scope_mappings "$dir/PLAN.md" >/dev/null; status=$(baseline_status "$dir"); if [ "$status" = captured ]; then validate_captured_baseline "$dir"; else historical_reference "$id" || fail "baseline missing or pending: $id"; fi; verify_freshness "$id"; verify_handoff "$id"; echo "run validated: $id" ;;
-  test) require_full_lifecycle; fixture_test; branch_test ;;
+  worker-evidence) record_worker_evidence "${2:?usage: $0 worker-evidence <TASK-ID> <RED|GREEN|REFACTOR|FIX> <pass|fail>}" "${3:?usage: $0 worker-evidence <TASK-ID> <PHASE> <RESULT>}" "${4:?usage: $0 worker-evidence <TASK-ID> <PHASE> <RESULT>}" ;;
+  verify-worker-evidence) verify_worker_evidence "${2:?usage: $0 verify-worker-evidence <TASK-ID>}" ;;
+  knowledge-done) knowledge_done "${2:?usage: $0 knowledge-done <TASK-ID> [not_applicable]}" "${3:-KNOWLEDGE_DONE}" ;;
+  publish-completion-report) publish_completion_report "${2:?usage: $0 publish-completion-report <TASK-ID> [ADAPTER]}" "${3:-markdown}" ;;
+  verify-completion-report) verify_completion_report "${2:?usage: $0 verify-completion-report <TASK-ID>}" ;;
+  validate) id=${2:?usage: $0 validate <TASK-ID>}; require_run "$id"; dir=$(run_dir "$id"); for f in TASK.md EVIDENCE.md PLAN.md RUN.yaml review/code-review.md review/verification.md RESULT.md; do [ -f "$dir/$f" ] || fail "missing required artifact: $f"; done; if section_key_present "$dir" completion_report required; then [ -f "$dir/COMPLETION_REPORT.md" ] || fail "missing required artifact: COMPLETION_REPORT.md"; fi; validate_control_artifacts "$id"; scope_mappings "$dir/PLAN.md" >/dev/null; status=$(baseline_status "$dir"); if [ "$status" = captured ]; then validate_captured_baseline "$dir"; else historical_reference "$id" || fail "baseline missing or pending: $id"; fi; verify_freshness "$id"; verify_handoff "$id"; echo "run validated: $id" ;;
+  test) require_full_lifecycle; fixture_test; branch_test; policy_test ;;
   role-test) require_full_lifecycle; role_test ;;
-  *) echo "usage: $0 {role|status|effective|baseline|branch|freeze|refreeze|verify-freeze|freshness|handoff|verify-handoff|delivery-check|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
+  *) echo "usage: $0 {role|status|effective|baseline|branch|freeze|refreeze|verify-freeze|freshness|handoff|verify-handoff|delivery-check|worker-evidence|verify-worker-evidence|knowledge-done|publish-completion-report|verify-completion-report|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
 esac

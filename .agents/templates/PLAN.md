@@ -2,6 +2,14 @@
 scope:
   - path: path/to/file
     criteria: [AC-1]
+    # Optional. Only set this when RED/GREEN evidence genuinely does not
+    # apply to this path (docs-only, metadata-only, pure control-plane
+    # config). Must be specific (>=20 chars) and not a generic stock phrase
+    # ("tdd not needed", "configuration change", etc.) — agent.sh rejects
+    # both at freeze time. Omit the key entirely for any behavior-changing
+    # path; it then requires implementation_worker RED+GREEN evidence
+    # before VERIFIED (see `worker-evidence` in .agents/VERIFICATION.md).
+    # tdd_exemption: "why RED/GREEN does not apply here, specifically"
 ---
 
 # Plan: <TASK-ID>

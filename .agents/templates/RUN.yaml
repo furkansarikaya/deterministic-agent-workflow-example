@@ -17,6 +17,7 @@ execution:
   mode: deterministic
   profile: core
   state: PLANNING
+  knowledge_state: not_started
 
 baseline:
   status: pending
@@ -32,3 +33,20 @@ handoff:
   verification_patch_sha256: PENDING
   review_patch_sha256: PENDING
   code_done_patch_sha256: PENDING
+
+# Presence of these three keys (not their values) is what makes a run subject
+# to worker-evidence/TDD/completion-report enforcement — see agent.sh's
+# `policy_enforced`/`historical_reference` pattern. A run frozen before this
+# policy existed has none of these keys and is never retroactively edited to
+# add them.
+worker_evidence:
+  required: true
+
+tdd:
+  required: true
+
+completion_report:
+  required: true
+  adapter: PENDING
+  published: false
+  receipt: PENDING

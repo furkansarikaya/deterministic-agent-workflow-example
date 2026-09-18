@@ -36,3 +36,7 @@ on it, and it is never rewritten to fabricate branch history it never had. Only 
 `RUN.yaml` schema includes that key is held to it. CODE DONE / KNOWLEDGE DONE never merge,
 push, delete, or switch off the task branch — completion and delivery remain separate
 concerns (`agent.sh delivery-check` is still local-only).
+
+## Implementation-worker invocation and the working tree
+
+`scripts/worker-run.sh` is the only sanctioned way to run `implementation_worker`: it shells out to `codex exec` with `AGENT_ROLE=implementation_worker` set for that subprocess only, on the run's own task branch (never `main`), and never on the caller's behalf falls back to `full_lifecycle` implementing the change if that invocation fails or `codex` is unavailable — a failed invocation leaves the task incomplete and the working tree exactly as the failed attempt left it, for inspection. `full_lifecycle` must not undo, reset, or hide a failed worker's partial edits without the same user confirmation any other destructive git action requires; retry is an explicit new `worker-run.sh` call, not silent cleanup.
