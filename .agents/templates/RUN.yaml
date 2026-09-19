@@ -53,3 +53,12 @@ completion_report:
   adapter: PENDING
   published: false
   receipt: PENDING
+
+# Presence of this key makes a run subject to the REVIEW/QA gate loop,
+# tree-attested implementation ownership, the hash-chained lifecycle ledger
+# (LEDGER.log) and the scripted `agent.sh amend` reopen — see agent.sh's
+# `gates_enforced` and .agents/WORKFLOW.md's "Lifecycle gates". A run frozen
+# before this policy existed (EXAMPLE-001) has no such key and is never
+# retroactively edited to add one.
+lifecycle_gates:
+  required: true

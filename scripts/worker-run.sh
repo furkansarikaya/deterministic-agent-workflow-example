@@ -95,11 +95,24 @@ set -- exec --sandbox "$sandbox" --add-dir "$log_dir"
 [ -n "$effort" ] && set -- "$@" --config "model_reasoning_effort=$effort"
 set -- "$@" --config "sandbox_workspace_write.network_access=$net_flag"
 
+# Bracket the worker run with tree attestation. For a run with the
+# lifecycle_gates policy under orchestrated topology, `window-open` proves the
+# application/test tree is still exactly what the previous worker window left
+# (refusing to start otherwise, so an edit made outside the worker cannot be
+# absorbed into a worker window) and prints its fingerprint; `window-close`,
+# run below whether or not codex succeeds, records the before/after pair as a
+# chained WINDOW record. Both are measured here, by the invoking orchestrator
+# process, never by the worker, and both are no-ops for any run that does not
+# use that policy (see agent.sh's verify_mutation_ownership).
+tree_before=$("$root/scripts/agent.sh" window-open "$task_id") || { echo "worker-run: refusing to start a worker window: the application/test tree is not the last attested state (see the message above); undo the unattributed change first" >&2; exit 1; }
+
 echo "worker-run: invoking codex $* (AGENT_ROLE=implementation_worker, network=$network)" | tee "$log_file"
-if AGENT_ROLE=implementation_worker CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" codex "$@" < "$prompt_file" >> "$log_file" 2>&1; then
+status=0
+AGENT_ROLE=implementation_worker CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" codex "$@" < "$prompt_file" >> "$log_file" 2>&1 || status=$?
+"$root/scripts/agent.sh" window-close "$task_id" "$tree_before" "$status" >> "$log_file" 2>&1 || { echo "worker-run: could not record the worker window (unattributed mutation?); log: ${log_file#$root/}" >&2; exit 1; }
+if [ "$status" -eq 0 ]; then
   echo "worker-run: codex exec completed (exit 0); log: ${log_file#$root/}"
 else
-  status=$?
   echo "worker-run: codex exec FAILED (exit $status); task remains incomplete, not implemented by full_lifecycle as a fallback; log: ${log_file#$root/}" >&2
   exit "$status"
 fi

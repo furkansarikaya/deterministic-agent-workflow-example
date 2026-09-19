@@ -8,7 +8,7 @@ hash_file() { shasum -a 256 "$1" | awk '{print $1}'; }
 run_dir() { printf '%s/.agents/runs/%s\n' "$root" "$1"; }
 config_value() { sed -n "s/^$1: *//p" "$2" | head -n 1 | tr -d '"'; }
 fail() { echo "$*" >&2; return 1; }
-valid_role() { case "$execution_role" in full_lifecycle|implementation_worker) ;; *) fail "invalid execution role: $execution_role";; esac; }
+valid_role() { case "$execution_role" in full_lifecycle|implementation_worker|independent_reviewer|independent_verifier) ;; *) fail "invalid execution role: $execution_role";; esac; }
 require_full_lifecycle() { [ "$execution_role" = full_lifecycle ] || fail "command denied for implementation_worker"; }
 
 valid_task_id() { case "$1" in *[!A-Za-z0-9_-]*|'') return 1;; esac; }
@@ -238,11 +238,22 @@ record_handoff() {
   # VERIFY/REVIEW is still rejected exactly as before this existed.
   allow_knowledge=0; [ "$phase" = DONE ] && allow_knowledge=1
   verify_freshness "$id"; verify_scope "$id" "$allow_knowledge"
+  # A hand edit of RUN.yaml lifecycle fields (the KW-006 state rewinds) is
+  # detected before any further transition is layered on top of it.
+  verify_seal "$id"
   patch=$(task_patch_fingerprint "$id")
   current=$(section_value "$dir" handoff state)
   case "$phase" in
     IMPLEMENTING)
-      case "$current" in PLANNED|IMPLEMENTING) ;; *) fail "illegal handoff transition: $current -> $phase";; esac ;;
+      case "$current" in
+        PLANNED|IMPLEMENTING) ;;
+        # Returning to IMPLEMENTING from a later phase exists only for a
+        # lifecycle_gates run with an open review/QA finding, and only for one
+        # bounded fix (see reopen_for_fix); every other run keeps the original
+        # rule that no transition leads back.
+        VERIFIED|REVIEWED) gates_enforced "$id" || fail "illegal handoff transition: $current -> $phase"; reopen_for_fix "$id" "$patch" ;;
+        *) fail "illegal handoff transition: $current -> $phase";;
+      esac ;;
     VERIFIED)
       case "$current" in
         IMPLEMENTING|VERIFIED) ;;
@@ -257,18 +268,31 @@ record_handoff() {
       # machine as though delegation occurred. No-op for a pre-hardening run
       # (see policy_enforced) or a historical reference.
       verify_worker_evidence "$id"
+      # lifecycle_gates runs additionally prove *who* changed the tree
+      # (orchestrated: only the implementation_worker) and that a fix stayed
+      # inside its finding's fix_scope. No-ops for every other run.
+      verify_mutation_ownership "$id" 1
+      verify_fix_bound "$id"
       replace_section_value "$dir" handoff verification_patch_sha256 "$patch" "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml"
       replace_section_value "$dir" handoff review_patch_sha256 PENDING "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml"
       replace_section_value "$dir" handoff code_done_patch_sha256 PENDING "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml" ;;
     REVIEWED)
       case "$current" in VERIFIED|REVIEWED) ;; *) fail "illegal handoff transition: $current -> $phase";; esac
       [ "$(section_value "$dir" handoff verification_patch_sha256)" = "$patch" ] || fail "review blocked: verification stale or missing"
+      if gates_enforced "$id"; then
+        verify_mutation_ownership "$id"
+        [ -n "$(gate_pass_seq "$id" REVIEW "$patch")" ] || fail "review blocked: no current, valid, sufficiently independent REVIEW pass gate for this exact application tree (see 'agent.sh gate')"
+      fi
       replace_section_value "$dir" handoff review_patch_sha256 "$patch" "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml"
       replace_section_value "$dir" handoff code_done_patch_sha256 PENDING "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml" ;;
     CODE_DONE)
       case "$current" in REVIEWED|CODE_DONE) ;; *) fail "illegal handoff transition: $current -> $phase";; esac
       [ "$(section_value "$dir" handoff verification_patch_sha256)" = "$patch" ] || fail "CODE_DONE blocked: verification stale or missing"
       [ "$(section_value "$dir" handoff review_patch_sha256)" = "$patch" ] || fail "CODE_DONE blocked: review stale or missing"
+      if gates_enforced "$id"; then
+        verify_mutation_ownership "$id"
+        verify_lifecycle_gates_for_code_done "$id" "$patch"
+      fi
       replace_section_value "$dir" handoff code_done_patch_sha256 "$patch" "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml" ;;
     DONE)
       case "$current" in CODE_DONE|DONE) ;; *) fail "illegal handoff transition: $current -> $phase";; esac
@@ -280,6 +304,7 @@ record_handoff() {
       # Knowledge transaction integrity: the Transaction B counterpart to the
       # application-scope check above — see verify_knowledge_scope.
       verify_knowledge_scope "$id"
+      verify_lifecycle_gates "$id"
       section_key_present "$dir" completion_report required && {
         ks=$(section_value "$dir" execution knowledge_state)
         case "$ks" in KNOWLEDGE_DONE|not_applicable) ;; *) fail "DONE blocked: knowledge transaction not recorded complete (see 'agent.sh knowledge-done')" ;; esac
@@ -288,6 +313,7 @@ record_handoff() {
   esac
   tmp=$dir/RUN.yaml.tmp; replace_section_value "$dir" handoff state "$phase" "$tmp" && mv "$tmp" "$dir/RUN.yaml"
   if [ "$phase" = CODE_DONE ]; then replace_section_value "$dir" execution state CODE_DONE "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml"; fi
+  if gates_enforced "$id"; then ledger_append "$id" "handoff:$phase" "$current" "$phase" ""; fi
   echo "handoff recorded: $id $phase"
 }
 # $2 (default: 0/strict) — forwarded to verify_scope; see verify_scope's own
@@ -303,6 +329,7 @@ verify_handoff() {
     [ "$recorded" = "$patch" ] || fail "${gate} stale: task-owned patch changed; rerun affected gate"
   done
   [ -n "$state" ] || fail "handoff state missing"
+  verify_lifecycle_gates "$id"
   echo "handoff integrity verified: $id"
 }
 delivery_check() {
@@ -381,7 +408,7 @@ validate_run() {
 known_control_artifact() {
   id=$1 path=$2
   case "$path" in
-    ".agents/runs/$id/TASK.md"|".agents/runs/$id/EVIDENCE.md"|".agents/runs/$id/PLAN.md"|".agents/runs/$id/RUN.yaml"|".agents/runs/$id/RESULT.md"|".agents/runs/$id/COMPLETION_REPORT.md"|".agents/runs/$id/review/code-review.md"|".agents/runs/$id/review/verification.md"|".agents/runs/$id/amendments/"*|".agents/runs/$id/worker-evidence/"*) return 0 ;;
+    ".agents/runs/$id/TASK.md"|".agents/runs/$id/EVIDENCE.md"|".agents/runs/$id/PLAN.md"|".agents/runs/$id/RUN.yaml"|".agents/runs/$id/RESULT.md"|".agents/runs/$id/COMPLETION_REPORT.md"|".agents/runs/$id/review/code-review.md"|".agents/runs/$id/review/verification.md"|".agents/runs/$id/amendments/"*|".agents/runs/$id/worker-evidence/"*|".agents/runs/$id/gates/"*|".agents/runs/$id/LEDGER.log") return 0 ;;
   esac
   # A published completion report legitimately (and only then) mutates the
   # task's own task_source.path via a task-integration adapter — see
@@ -391,7 +418,10 @@ known_control_artifact() {
   # exemption does not apply, so an unrelated mid-IMPLEMENT edit to the task
   # source file is still correctly flagged.
   rundir=$(run_dir "$id")
-  if [ "$(section_value "$rundir" completion_report published)" = true ]; then
+  # After `amend` reopens a published run, the task source still holds the
+  # previously published report until the next publication replaces it, so the
+  # exemption also holds for a run that has been reopened.
+  if [ "$(section_value "$rundir" completion_report published)" = true ] || ls "$rundir"/gates/*-REOPEN.yaml >/dev/null 2>&1; then
     source_path=$(section_value "$rundir" task_source path)
     [ -n "$source_path" ] && [ "$path" = "$source_path" ] && return 0
   fi
@@ -515,6 +545,7 @@ record_worker_evidence() {
   [ "$(section_value "$dir" handoff state)" = IMPLEMENTING ] || fail "worker evidence may only be recorded while handoff state is IMPLEMENTING"
   verify_freeze "$id"
   enforce_task_branch "$id"
+  verify_seal "$id"
   scratch=$(mktemp "${TMPDIR:-/tmp}/agent-worker-evidence.XXXXXX"); cat > "$scratch"
   command_text=$(sed -n 's/^command: *//p' "$scratch" | head -1)
   target_text=$(sed -n 's/^target: *//p' "$scratch" | head -1)
@@ -536,15 +567,6 @@ record_worker_evidence() {
   mkdir -p "$evdir" || { rm -f "$scratch"; fail "worker evidence directory could not be created (sandbox denied write?): $evdir"; }
   seq=$(next_evidence_seq "$evdir" "$phase")
   out="$evdir/$phase-$seq.yaml"
-  # Fail closed, not silently: on some sandboxes (notably `codex exec
-  # --sandbox workspace-write` without the run's worker-evidence directory
-  # explicitly added via --add-dir — see scripts/worker-run.sh) this
-  # redirect can fail with EPERM while the rest of the script continues, so
-  # a missing/short/unreadable result here must abort loudly rather than
-  # print a false "recorded" message — this exact failure mode was observed
-  # in a real Codex `implementation_worker` invocation (see
-  # .agents/WORKFLOW.md's "Worker evidence and the sandbox boundary"
-  # section).
   {
     printf 'task_id: "%s"\n' "$id"
     printf 'phase: "%s"\n' "$phase"
@@ -657,6 +679,427 @@ verify_worker_evidence() {
   echo "worker-evidence verified: $id (topology=$topology)"
 }
 
+# ---------------------------------------------------------------------------
+# Lifecycle gates, tree-attested mutation ownership, the lifecycle ledger, and
+# the scripted reopen (`amend`) transition.
+#
+# Everything in this section is gated on `gates_enforced`: a run whose
+# RUN.yaml carries the `lifecycle_gates:` key block. A run frozen before this
+# policy existed (KW-001..KW-006, EXAMPLE-001) has no such block, is never
+# retroactively edited to add one, and keeps its original semantics exactly —
+# the same grandfather pattern as `repository.task_branch` and
+# `worker_evidence:`. New variables below use a g_ prefix on purpose: this
+# script is POSIX sh with no `local`, and callers rely on id/dir/phase/patch/
+# current surviving these calls.
+#
+# What it adds, in one paragraph: REVIEW and QA are first-class gates recorded
+# as append-only evidence bound to the exact task-owned patch fingerprint, so a
+# byte changed after either gate voids it (the existing verify_handoff patch
+# staleness already proved the tree; the gate records prove *who* judged it and
+# with what independence). Under `orchestrated` topology every change to the
+# application tree must be attested by the implementation_worker (evidence
+# carries the tree before and after each worker window, chained), so an edit by
+# any other actor breaks the chain. Every lifecycle transition is appended to a
+# hash-chained ledger and the ledger's last digest must equal the digest of the
+# RUN.yaml lifecycle fields, so a hand edit of those fields is detected. A run
+# at CODE_DONE/DONE is reopened only by `amend`, which records why, preserves
+# the prior completion history, and routes the fix through the same loop.
+# ---------------------------------------------------------------------------
+gates_enforced() { section_key_present "$(run_dir "$1")" lifecycle_gates required && ! historical_reference "$1"; }
+policy_flag() { effective "$1" | sed -n "s/^$2=//p" | head -n 1; }
+max_fix_attempts() { n=$(policy_flag "$1" verification.max_bounded_fix_attempts); case "$n" in ''|*[!0-9]*) n=2 ;; esac; printf '%s\n' "$n"; }
+set_run_value() {
+  g_d=$(run_dir "$1")
+  replace_section_value "$g_d" "$2" "$3" "$4" "$g_d/RUN.yaml.tmp" || { rm -f "$g_d/RUN.yaml.tmp"; fail "RUN.yaml has no $2.$3 to set"; }
+  mv "$g_d/RUN.yaml.tmp" "$g_d/RUN.yaml"
+}
+one_line() { printf '%s' "$1" | tr '\n\t' '  '; }
+field_from() { sed -n "s/^$2: *//p" "$1" | head -1; }
+
+# --- Lifecycle ledger (manual state-rewind detection + audit history) -------
+ledger_file() { printf '%s/LEDGER.log\n' "$(run_dir "$1")"; }
+_lv() { printf '%s.%s=%s\n' "$2" "$3" "$(section_value "$1" "$2" "$3")"; }
+lifecycle_digest() {
+  g_d=$(run_dir "$1")
+  { _lv "$g_d" execution state; _lv "$g_d" execution knowledge_state; _lv "$g_d" handoff state
+    _lv "$g_d" handoff verification_patch_sha256; _lv "$g_d" handoff review_patch_sha256; _lv "$g_d" handoff code_done_patch_sha256
+    _lv "$g_d" completion_report published; _lv "$g_d" completion_report adapter; _lv "$g_d" completion_report receipt
+  } | shasum -a 256 | awk '{print $1}'
+}
+ledger_append() {
+  g_id=$1 g_event=$2 g_from=$3 g_to=$4 g_detail=$(one_line "$5")
+  g_file=$(ledger_file "$g_id"); g_seq=1 g_prev=genesis
+  if [ -s "$g_file" ]; then
+    g_last=$(tail -n 1 "$g_file")
+    g_seq=$(( $(printf '%s' "$g_last" | sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p') + 1 ))
+    g_prev=$(printf '%s' "$g_last" | shasum -a 256 | awk '{print $1}')
+  fi
+  printf 'seq=%s prev=%s event=%s role=%s from=%s to=%s digest=%s ts=%s detail=%s\n' "$g_seq" "$g_prev" "$g_event" "$execution_role" "$g_from" "$g_to" "$(lifecycle_digest "$g_id")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$g_detail" >> "$g_file" || fail "could not append to lifecycle ledger: $g_file"
+}
+# The ledger records every control-plane lifecycle transition; the digest of
+# the RUN.yaml lifecycle fields at each step is sealed into the chain. If those
+# fields no longer match the last sealed digest, something other than this
+# script changed them. This cannot stop a determined same-user forger from
+# re-sealing a rewritten ledger (see .agents/ENFORCEMENT.md "Evidence
+# strength") — it makes a hand edit of lifecycle state, the KW-006 failure
+# mode, mechanically detectable instead of silently accepted.
+verify_seal() {
+  g_id=$1; gates_enforced "$g_id" || return 0
+  g_d=$(run_dir "$g_id"); g_file=$(ledger_file "$g_id")
+  if [ ! -s "$g_file" ]; then
+    g_hs=$(section_value "$g_d" handoff state)
+    case "$g_hs" in PLANNED|'') ;; *) fail "lifecycle ledger missing but handoff.state=$g_hs: manual lifecycle-state edit detected for $g_id" ;; esac
+    [ "$(run_state "$g_d")" != CODE_DONE ] || fail "lifecycle ledger missing but execution.state=CODE_DONE: manual lifecycle-state edit detected for $g_id"
+    [ "$(section_value "$g_d" completion_report published)" != true ] || fail "lifecycle ledger missing but a completion report is marked published: manual lifecycle-state edit detected for $g_id"
+    return 0
+  fi
+  g_prev=genesis g_n=0 g_lastdigest=''
+  while IFS= read -r g_line || [ -n "$g_line" ]; do
+    g_n=$((g_n + 1))
+    g_lseq=$(printf '%s' "$g_line" | sed -n 's/^seq=\([0-9][0-9]*\) prev=.*/\1/p')
+    g_lprev=$(printf '%s' "$g_line" | sed -n 's/^seq=[0-9]* prev=\([^ ]*\) .*/\1/p')
+    [ "$g_lseq" = "$g_n" ] && [ "$g_lprev" = "$g_prev" ] || fail "lifecycle ledger chain broken at entry $g_n for $g_id: ledger was edited"
+    g_lastdigest=$(printf '%s' "$g_line" | sed -n 's/^seq=[0-9]* prev=[^ ]* event=[^ ]* role=[^ ]* from=[^ ]* to=[^ ]* digest=\([0-9a-f]*\) ts=.*/\1/p')
+    g_prev=$(printf '%s' "$g_line" | shasum -a 256 | awk '{print $1}')
+  done < "$g_file"
+  [ "$g_lastdigest" = "$(lifecycle_digest "$g_id")" ] || fail "lifecycle state of $g_id does not match its last recorded control-plane transition: RUN.yaml lifecycle fields were edited by hand. A completed run is reopened only with 'agent.sh amend'"
+}
+
+# --- Gate records (REVIEW / QA / REOPEN) ------------------------------------
+gates_dir() { printf '%s/gates\n' "$(run_dir "$1")"; }
+gate_field() { sed -n "s/^$2: *//p" "$1" | head -1 | tr -d '"'; }
+gate_names() { ls -1 "$(gates_dir "$1")" 2>/dev/null | grep -E '^[0-9]{3}-(REVIEW|QA|REOPEN)\.yaml$' | sort || true; }
+next_gate_seq() {
+  n=0
+  for f in $(gate_names "$1"); do s=$(gate_field "$(gates_dir "$1")/$f" seq); if [ "$s" -gt "$n" ]; then n=$s; fi; done
+  printf '%d\n' $((n + 1))
+}
+last_reopen_seq() {
+  n=0
+  for f in $(gate_names "$1"); do case "$f" in *-REOPEN.yaml) n=$(gate_field "$(gates_dir "$1")/$f" seq) ;; esac; done
+  printf '%s\n' "$n"
+}
+patch_manifest() {
+  task_owned_paths "$1" | while IFS= read -r p; do
+    if [ -n "$p" ]; then printf '%s|%s\n' "$p" "$(fingerprint_path "$p")"; fi
+  done
+}
+# Structural, freeze-bound validity of one gate record: it belongs to this
+# task, was recorded against the exact frozen task/evidence/plan hashes (a
+# refreeze stales it), and its manifest still hashes to what it recorded.
+valid_gate_file() {
+  g_id=$1 g_f=$2 g_d=$(run_dir "$1")
+  [ "$(gate_field "$g_f" task_id)" = "$g_id" ] || return 1
+  for g_h in task evidence plan; do [ "$(gate_field "$g_f" "${g_h}_sha256")" = "$(section_value "$g_d" freeze "${g_h}_sha256")" ] || return 1; done
+  g_m=${g_f%.yaml}.manifest; [ -f "$g_m" ] || return 1
+  [ "$(gate_field "$g_f" manifest_sha256)" = "$(hash_file "$g_m")" ] || return 1
+  return 0
+}
+# Whether an author role satisfies a gate under this run's effective policy:
+# an independent_* role always does; full_lifecycle (self-review/self-QA) does
+# only when the policy does not require independence. implementation_worker
+# never authors a gate.
+gate_role_ok() {
+  case "$2:$3" in REVIEW:independent_reviewer|QA:independent_verifier) return 0 ;; esac
+  case "$2:$3" in
+    REVIEW:full_lifecycle) [ "$(policy_flag "$1" review.independent)" != true ]; return ;;
+    QA:full_lifecycle) [ "$(policy_flag "$1" verification.independent_verifier)" != true ]; return ;;
+  esac
+  return 1
+}
+# Sequence number of the qualifying, current PASS for <gate> on <patch>, or
+# empty. Qualifying: latest record of that gate for this exact tree is a
+# pass; freeze-bound valid; authored by an acceptable role; recorded after the
+# most recent REOPEN; and not voided by a later fail of either gate on the
+# same tree.
+gate_pass_seq() {
+  g_id=$1 g_gate=$2 g_patch=$3 g_gd=$(gates_dir "$1"); g_reopen=$(last_reopen_seq "$1"); g_found=''
+  for g_n in $(gate_names "$g_id"); do
+    g_f=$g_gd/$g_n
+    [ "$(gate_field "$g_f" patch_sha256)" = "$g_patch" ] || continue
+    g_s=$(gate_field "$g_f" seq); [ "$g_s" -gt "$g_reopen" ] || continue
+    g_t=$(gate_field "$g_f" gate); g_r=$(gate_field "$g_f" result)
+    if [ "$g_t" = "$g_gate" ]; then
+      if [ "$g_r" = pass ] && valid_gate_file "$g_id" "$g_f" && gate_role_ok "$g_id" "$g_gate" "$(gate_field "$g_f" role)"; then g_found=$g_s; else g_found=''; fi
+    elif [ "$g_r" = fail ]; then g_found=''; fi
+  done
+  printf '%s\n' "$g_found"
+}
+# A tree that already has a fail (or REOPEN) record against the current frozen
+# plan is an open finding: it cannot collect further gate records or advance
+# until a fix changes it.
+open_finding_seq() {
+  g_id=$1 g_patch=$2 g_gd=$(gates_dir "$1"); g_plan=$(section_value "$(run_dir "$1")" freeze plan_sha256); g_hit=''
+  for g_n in $(gate_names "$g_id"); do
+    g_f=$g_gd/$g_n
+    [ "$(gate_field "$g_f" patch_sha256)" = "$g_patch" ] || continue
+    [ "$(gate_field "$g_f" plan_sha256)" = "$g_plan" ] || continue
+    case "$(gate_field "$g_f" gate):$(gate_field "$g_f" result)" in REOPEN:*|REVIEW:fail|QA:fail) g_hit=$(gate_field "$g_f" seq) ;; esac
+  done
+  printf '%s\n' "$g_hit"
+}
+fix_cycles_used() {
+  g_id=$1 g_gd=$(gates_dir "$1"); g_plan=$(section_value "$(run_dir "$1")" freeze plan_sha256); g_reopen=$(last_reopen_seq "$1"); g_c=0
+  for g_n in $(gate_names "$g_id"); do
+    g_f=$g_gd/$g_n
+    [ "$(gate_field "$g_f" result)" = fail ] || continue
+    [ "$(gate_field "$g_f" plan_sha256)" = "$g_plan" ] || continue
+    [ "$(gate_field "$g_f" seq)" -gt "$g_reopen" ] || continue
+    g_c=$((g_c + 1))
+  done
+  printf '%d\n' "$g_c"
+}
+latest_finding_file() {
+  g_id=$1 g_gd=$(gates_dir "$1"); g_plan=$(section_value "$(run_dir "$1")" freeze plan_sha256); g_hit=''
+  for g_n in $(gate_names "$g_id"); do
+    g_f=$g_gd/$g_n
+    [ "$(gate_field "$g_f" plan_sha256)" = "$g_plan" ] || continue
+    case "$(gate_field "$g_f" gate):$(gate_field "$g_f" result)" in REOPEN:*|REVIEW:fail|QA:fail) g_hit=$g_f ;; esac
+  done
+  printf '%s\n' "$g_hit"
+}
+
+# A fix is bounded by the finding's contract: every application path whose
+# fingerprint differs from the failing tree's manifest must be named in that
+# finding's fix_scope, and the tree must actually have changed.
+verify_fix_bound() {
+  g_id=$1; gates_enforced "$g_id" || return 0
+  g_f=$(latest_finding_file "$g_id"); [ -n "$g_f" ] || return 0
+  g_patch=$(task_patch_fingerprint "$g_id")
+  [ "$g_patch" != "$(gate_field "$g_f" patch_sha256)" ] || fail "no application/test change since the finding in ${g_f##*/}: a fix must change the tree before it can be re-reviewed"
+  g_delta=$( { cat "${g_f%.yaml}.manifest"; patch_manifest "$g_id"; } | sed '/^$/d' | sort | uniq -u | cut -d '|' -f1 | sort -u )
+  g_scope=$(gate_field "$g_f" fix_scope); g_bad=''
+  for g_p in $g_delta; do
+    printf '%s\n' "$g_scope" | tr ',' '\n' | grep -Fxq "$g_p" || g_bad="$g_bad $g_p"
+  done
+  [ -z "$g_bad" ] || fail "fix changed paths outside the finding's fix_scope (${g_f##*/}):$g_bad"
+}
+
+# Tree-attested mutation ownership. Under orchestrated topology every change
+# to the task-owned application/test tree must come from the
+# implementation_worker. scripts/worker-run.sh — the only sanctioned worker
+# invocation, run by the orchestrator process *outside* the worker — brackets
+# each worker run with `window-open` / `window-close`, which record the tree
+# fingerprint before and after the window (worker-evidence/WINDOW-<n>.yaml).
+# Windows must chain (each begins where the previous ended; the first from the
+# pristine tree), and the tree now must equal the last window's end. A change
+# made by anyone else — the orchestrator fixing something itself after review,
+# say — leaves the tree different from the last attested end and is rejected.
+# Attestation is by the wrapper, not by the worker's own bookkeeping, so a
+# worker that forgets to record evidence cannot taint the chain. `force=1`
+# checks even while handoff is still IMPLEMENTING (used by the VERIFIED
+# transition and by window-open).
+window_files() { ls -1 "$(worker_evidence_dir "$1")" 2>/dev/null | grep -E '^WINDOW-[0-9]+\.yaml$' | sort -t - -k2,2n || true; }
+pristine_tree() { printf '' | shasum -a 256 | awk '{print $1}'; }
+last_attested_tree() {
+  n=$(pristine_tree)
+  for f in $(window_files "$1"); do n=$(evidence_field "$(worker_evidence_dir "$1")/$f" after_sha256); done
+  printf '%s\n' "$n"
+}
+verify_mutation_ownership() {
+  g_id=$1 g_force=${2:-0}; gates_enforced "$g_id" || return 0
+  g_d=$(run_dir "$g_id"); g_topo=$(resolve_topology "$g_d") || return 1
+  [ "$g_topo" = orchestrated ] || return 0
+  g_hs=$(section_value "$g_d" handoff state)
+  case "$g_hs" in VERIFIED|REVIEWED|CODE_DONE|DONE) ;; *) [ "$g_force" = 1 ] || return 0 ;; esac
+  g_prev_after=$(pristine_tree); g_ev=$(worker_evidence_dir "$g_id")
+  for g_w in $(window_files "$g_id"); do
+    [ "$(evidence_field "$g_ev/$g_w" role)" = implementation_worker ] || fail "worker window ${g_w%.yaml} was not attested for implementation_worker"
+    [ "$(evidence_field "$g_ev/$g_w" before_sha256)" = "$g_prev_after" ] || fail "unattributed application/test mutation before ${g_w%.yaml}: the tree changed between worker windows outside the implementation_worker"
+    g_prev_after=$(evidence_field "$g_ev/$g_w" after_sha256)
+  done
+  g_tree=$(task_patch_fingerprint "$g_id")
+  [ "$g_tree" = "$g_prev_after" ] || fail "application/test tree ($g_tree) is not the last implementation_worker-attested tree ($g_prev_after): a mutation was made outside the worker under orchestrated topology; undo it and route the change through the implementation_worker (scripts/worker-run.sh)"
+}
+# window-open prints the tree fingerprint the worker window starts from (after
+# proving the tree is still the last attested one); window-close records the
+# window. Both are no-ops for a run that is not lifecycle_gates + orchestrated,
+# so scripts/worker-run.sh can call them unconditionally.
+window_open() {
+  g_id=$1; require_run "$g_id"; gates_enforced "$g_id" || return 0
+  g_d=$(run_dir "$g_id"); [ "$(resolve_topology "$g_d")" = orchestrated ] || return 0
+  [ "$(section_value "$g_d" handoff state)" = IMPLEMENTING ] || fail "worker windows are opened only while handoff state is IMPLEMENTING"
+  verify_seal "$g_id"; verify_mutation_ownership "$g_id" 1
+  task_patch_fingerprint "$g_id"
+}
+window_close() {
+  g_id=$1 g_before=$2 g_status=${3:-0}; require_run "$g_id"; gates_enforced "$g_id" || return 0
+  g_d=$(run_dir "$g_id"); [ "$(resolve_topology "$g_d")" = orchestrated ] || return 0
+  [ -n "$g_before" ] || fail "window-close requires the fingerprint printed by window-open"
+  [ "$(section_value "$g_d" handoff state)" = IMPLEMENTING ] || fail "worker windows are closed only while handoff state is IMPLEMENTING"
+  [ "$g_before" = "$(last_attested_tree "$g_id")" ] || fail "worker window began at a tree that is not the last attested one: unattributed mutation"
+  g_ev=$(worker_evidence_dir "$g_id"); mkdir -p "$g_ev" || fail "cannot create $g_ev"
+  g_n=$(next_evidence_seq "$g_ev" WINDOW)
+  {
+    printf 'task_id: "%s"\nseq: %s\nrole: "implementation_worker"\ntopology: "orchestrated"\n' "$g_id" "$g_n"
+    printf 'before_sha256: "%s"\nafter_sha256: "%s"\nexit_status: "%s"\n' "$g_before" "$(task_patch_fingerprint "$g_id")" "$g_status"
+    printf 'timestamp: "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$g_ev/WINDOW-$g_n.yaml" || fail "could not write worker window record"
+  echo "worker window recorded: $g_id WINDOW-$g_n"
+}
+
+# Gate/ledger/ownership integrity for the run's current handoff state; called
+# by verify_handoff (and therefore validate, delivery-check and `verify-handoff`).
+verify_lifecycle_gates() {
+  g_id=$1; gates_enforced "$g_id" || return 0
+  g_d=$(run_dir "$g_id"); g_hs=$(section_value "$g_d" handoff state)
+  verify_seal "$g_id"
+  verify_mutation_ownership "$g_id"
+  case "$g_hs" in VERIFIED|REVIEWED|CODE_DONE|DONE) ;; *) return 0 ;; esac
+  g_patch=$(task_patch_fingerprint "$g_id")
+  case "$g_hs" in VERIFIED|REVIEWED) [ -z "$(open_finding_seq "$g_id" "$g_patch")" ] || return 0 ;; esac
+  case "$g_hs" in REVIEWED|CODE_DONE|DONE)
+    [ -n "$(gate_pass_seq "$g_id" REVIEW "$g_patch")" ] || fail "review gate evidence missing or stale for the current application tree: $g_id" ;;
+  esac
+  case "$g_hs" in CODE_DONE|DONE)
+    g_q=$(gate_pass_seq "$g_id" QA "$g_patch"); g_r=$(gate_pass_seq "$g_id" REVIEW "$g_patch")
+    [ -n "$g_q" ] || fail "QA gate evidence missing or stale for the current application tree: $g_id"
+    [ "$g_q" -gt "$g_r" ] || fail "QA gate was recorded before the review pass on this tree: $g_id" ;;
+  esac
+}
+
+verify_lifecycle_gates_for_code_done() {
+  g_id=$1 g_patch=$2
+  g_r=$(gate_pass_seq "$g_id" REVIEW "$g_patch"); g_q=$(gate_pass_seq "$g_id" QA "$g_patch")
+  [ -n "$g_r" ] || fail "CODE_DONE blocked: no current REVIEW pass gate for this exact application tree"
+  [ -n "$g_q" ] || fail "CODE_DONE blocked: no current, valid, sufficiently independent QA pass gate for this exact application tree (see 'agent.sh gate')"
+  [ "$g_q" -gt "$g_r" ] || fail "CODE_DONE blocked: the QA pass was recorded before the review pass on this tree; review must precede QA"
+}
+
+# Records one REVIEW or QA gate result. Fields on stdin: summary (what was
+# checked, >=20 chars); for a fail also findings, fix_scope (comma-separated
+# frozen-scope paths) and fix_instruction — the bounded fix contract the
+# implementation owner must work to.
+record_gate() {
+  g_id=$1 g_gate=$2 g_result=$3; require_run "$g_id"; g_d=$(run_dir "$g_id")
+  gates_enforced "$g_id" || fail "run $g_id has no lifecycle_gates policy (pre-hardening run): review/QA gates are not recorded for it"
+  case "$g_gate" in REVIEW|QA) ;; *) fail "invalid gate: $g_gate (want REVIEW|QA)" ;; esac
+  case "$g_result" in pass|fail) ;; *) fail "invalid gate result: $g_result (want pass|fail)" ;; esac
+  case "$g_gate:$execution_role" in
+    REVIEW:full_lifecycle|REVIEW:independent_reviewer|QA:full_lifecycle|QA:independent_verifier) ;;
+    *) fail "role $execution_role may not record a $g_gate gate" ;;
+  esac
+  enforce_task_branch "$g_id"; verify_freshness "$g_id"; verify_seal "$g_id"
+  g_want=VERIFIED; [ "$g_gate" = QA ] && g_want=REVIEWED
+  [ "$(section_value "$g_d" handoff state)" = "$g_want" ] || fail "$g_gate gate may only be recorded while handoff state is $g_want"
+  verify_scope "$g_id" 0 >/dev/null
+  g_patch=$(task_patch_fingerprint "$g_id")
+  [ "$(section_value "$g_d" handoff verification_patch_sha256)" = "$g_patch" ] || fail "$g_gate gate blocked: the application tree changed since VERIFIED"
+  if [ "$g_gate" = QA ]; then [ "$(section_value "$g_d" handoff review_patch_sha256)" = "$g_patch" ] || fail "QA gate blocked: the application tree changed since REVIEWED"; fi
+  verify_mutation_ownership "$g_id"
+  [ -z "$(open_finding_seq "$g_id" "$g_patch")" ] || fail "$g_gate gate blocked: this exact tree already has an open finding; the implementation owner must fix it first"
+  if [ "$g_gate" = QA ]; then [ -n "$(gate_pass_seq "$g_id" REVIEW "$g_patch")" ] || fail "QA gate blocked: no current review pass for this tree"; fi
+  if [ "$g_result" = pass ]; then
+    gate_role_ok "$g_id" "$g_gate" "$execution_role" || fail "$g_gate pass rejected: policy requires an independent author (independent_$( [ "$g_gate" = REVIEW ] && echo reviewer || echo verifier )) and role '$execution_role' is not independent"
+  fi
+  g_scratch=$(mktemp "${TMPDIR:-/tmp}/agent-gate.XXXXXX"); cat > "$g_scratch"
+  g_summary=$(field_from "$g_scratch" summary); g_findings=$(field_from "$g_scratch" findings); g_fscope=$(field_from "$g_scratch" fix_scope); g_finstr=$(field_from "$g_scratch" fix_instruction)
+  rm -f "$g_scratch"
+  reject_generic_justification "$g_summary" || fail "$g_gate gate requires a specific summary (>=20 chars, not a stock phrase)"
+  if [ "$g_result" = fail ]; then
+    reject_generic_justification "$g_findings" || fail "a failing gate requires specific findings (>=20 chars)"
+    reject_generic_justification "$g_finstr" || fail "a failing gate requires a specific fix_instruction (>=20 chars)"
+    [ -n "$g_fscope" ] || fail "a failing gate requires fix_scope (comma-separated frozen-scope paths the fix may touch)"
+    g_maps=$(scope_mappings "$g_d/PLAN.md") || fail "invalid scope mapping"
+    for g_p in $(printf '%s' "$g_fscope" | tr ',' ' '); do authorized_path "$g_maps" "$g_p" || fail "fix_scope names a path outside the frozen scope: $g_p"; done
+  fi
+  g_seq=$(next_gate_seq "$g_id"); [ "$g_seq" -le 999 ] || fail "gate record limit reached"
+  g_name=$(printf '%03d-%s' "$g_seq" "$g_gate"); g_gd=$(gates_dir "$g_id"); mkdir -p "$g_gd" || fail "cannot create $g_gd"
+  patch_manifest "$g_id" > "$g_gd/$g_name.manifest" || fail "could not write gate manifest"
+  {
+    printf 'task_id: "%s"\nseq: %s\ngate: "%s"\nresult: "%s"\nrole: "%s"\n' "$g_id" "$g_seq" "$g_gate" "$g_result" "$execution_role"
+    printf 'topology: "%s"\n' "$(resolve_topology "$g_d")"
+    printf 'patch_sha256: "%s"\nmanifest_sha256: "%s"\n' "$g_patch" "$(hash_file "$g_gd/$g_name.manifest")"
+    printf 'task_sha256: "%s"\nevidence_sha256: "%s"\nplan_sha256: "%s"\n' "$(section_value "$g_d" freeze task_sha256)" "$(section_value "$g_d" freeze evidence_sha256)" "$(section_value "$g_d" freeze plan_sha256)"
+    printf 'summary: %s\n' "$(one_line "$g_summary")"
+    if [ "$g_result" = fail ]; then printf 'findings: %s\nfix_scope: %s\nfix_instruction: %s\n' "$(one_line "$g_findings")" "$g_fscope" "$(one_line "$g_finstr")"; fi
+    printf 'timestamp: "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$g_gd/$g_name.yaml" || fail "could not write gate record"
+  [ -s "$g_gd/$g_name.yaml" ] || { rm -f "$g_gd/$g_name.yaml" "$g_gd/$g_name.manifest"; fail "gate record was not written"; }
+  ledger_append "$g_id" "gate:$g_gate:$g_result" "$g_want" "$g_want" "$g_name by $execution_role"
+  echo "gate recorded: $g_id $g_name ($g_result)"
+}
+
+# Called by the IMPLEMENTING transition out of VERIFIED/REVIEWED: reopens the
+# implementation phase for exactly one bounded fix of an open finding.
+reopen_for_fix() {
+  g_id=$1 g_patch=$2
+  [ -n "$(open_finding_seq "$g_id" "$g_patch")" ] || fail "no open review/QA finding on the current tree: nothing to fix, and a run does not return to IMPLEMENTING without one"
+  g_used=$(fix_cycles_used "$g_id"); g_max=$(max_fix_attempts "$g_id")
+  [ "$g_used" -le "$g_max" ] || fail "bounded fix attempts exhausted ($g_used failing gates against this plan, max $g_max fixes): escalate — an explicit plan amendment and refreeze is required to continue"
+  set_run_value "$g_id" handoff verification_patch_sha256 PENDING
+  set_run_value "$g_id" handoff review_patch_sha256 PENDING
+  set_run_value "$g_id" handoff code_done_patch_sha256 PENDING
+}
+
+# A plan amendment (refreeze) stales all frozen-hash-bound evidence, so a
+# lifecycle_gates run that is past IMPLEMENTING returns to IMPLEMENTING with
+# every downstream gate invalidated — the scripted path back that a refreeze
+# during review/QA previously lacked. It is also the explicit escalation valve
+# when the bounded fix attempts are exhausted: findings are counted per frozen
+# plan, so an authorized amendment starts a fresh budget.
+refreeze_lifecycle() {
+  g_id=$1 g_amend=$2; g_d=$(run_dir "$g_id"); g_hs=$(section_value "$g_d" handoff state); g_to=$g_hs
+  case "$g_hs" in
+    VERIFIED|REVIEWED)
+      set_run_value "$g_id" handoff state IMPLEMENTING
+      set_run_value "$g_id" handoff verification_patch_sha256 PENDING
+      set_run_value "$g_id" handoff review_patch_sha256 PENDING
+      set_run_value "$g_id" handoff code_done_patch_sha256 PENDING
+      g_to=IMPLEMENTING ;;
+  esac
+  ledger_append "$g_id" refreeze "$g_hs" "$g_to" "amendment $g_amend"
+}
+
+# The scripted reopen of a CODE_DONE/DONE run (the transition KW-006 lacked).
+# Fields on stdin: reason, fix_scope, fix_instruction, authorized_by. Frozen
+# TASK/EVIDENCE/PLAN are untouched; if the plan itself must change, follow with
+# an amendment file and `refreeze` as usual (execution.state is AMENDING, so
+# refreeze is permitted). The prior completion record is preserved in the
+# REOPEN gate record; every downstream gate and the published report are
+# invalidated by construction (patch PENDING, published=false).
+amend_run() {
+  g_id=$1; require_run "$g_id"; g_d=$(run_dir "$g_id"); require_full_lifecycle
+  gates_enforced "$g_id" || fail "amend is unavailable for run $g_id: it has no lifecycle_gates policy. Historical/pre-hardening runs are never reopened or rewritten; open a new task"
+  [ "$(run_state "$g_d")" = CODE_DONE ] || fail "amend reopens a CODE_DONE/DONE run only (execution.state is '$(run_state "$g_d")'); before CODE_DONE, findings go through the review/QA gate and fix loop"
+  enforce_task_branch "$g_id"; verify_seal "$g_id"; verify_freshness "$g_id"; verify_handoff "$g_id" 1 >/dev/null
+  g_scratch=$(mktemp "${TMPDIR:-/tmp}/agent-amend.XXXXXX"); cat > "$g_scratch"
+  g_reason=$(field_from "$g_scratch" reason); g_fscope=$(field_from "$g_scratch" fix_scope); g_finstr=$(field_from "$g_scratch" fix_instruction); g_auth=$(field_from "$g_scratch" authorized_by); g_pchange=$(field_from "$g_scratch" plan_change)
+  rm -f "$g_scratch"
+  reject_generic_justification "$g_reason" || fail "amend requires a specific reason (>=20 chars)"
+  reject_generic_justification "$g_finstr" || fail "amend requires a specific fix_instruction (>=20 chars)"
+  [ "${#g_auth}" -ge 3 ] || fail "amend requires authorized_by (who authorized reopening a completed run)"
+  [ -n "$g_fscope" ] || fail "amend requires fix_scope (comma-separated paths the fix may touch)"
+  if [ "$g_pchange" != yes ]; then
+    g_maps=$(scope_mappings "$g_d/PLAN.md") || fail "invalid scope mapping"
+    for g_p in $(printf '%s' "$g_fscope" | tr ',' ' '); do authorized_path "$g_maps" "$g_p" || fail "fix_scope names a path outside the frozen scope: $g_p (add 'plan_change: yes' and follow with an amendment + refreeze if the plan itself must change)"; done
+  fi
+  g_patch=$(task_patch_fingerprint "$g_id"); g_seq=$(next_gate_seq "$g_id"); g_name=$(printf '%03d-REOPEN' "$g_seq"); g_gd=$(gates_dir "$g_id"); mkdir -p "$g_gd" || fail "cannot create $g_gd"
+  patch_manifest "$g_id" > "$g_gd/$g_name.manifest" || fail "could not write reopen manifest"
+  [ -f "$g_d/COMPLETION_REPORT.md" ] && cp "$g_d/COMPLETION_REPORT.md" "$g_gd/$g_name.completion-report.md"
+  g_prev_hs=$(section_value "$g_d" handoff state)
+  {
+    printf 'task_id: "%s"\nseq: %s\ngate: "REOPEN"\nresult: "reopen"\nrole: "%s"\n' "$g_id" "$g_seq" "$execution_role"
+    printf 'patch_sha256: "%s"\nmanifest_sha256: "%s"\n' "$g_patch" "$(hash_file "$g_gd/$g_name.manifest")"
+    printf 'task_sha256: "%s"\nevidence_sha256: "%s"\nplan_sha256: "%s"\n' "$(section_value "$g_d" freeze task_sha256)" "$(section_value "$g_d" freeze evidence_sha256)" "$(section_value "$g_d" freeze plan_sha256)"
+    printf 'reason: %s\nauthorized_by: %s\nfix_scope: %s\nfix_instruction: %s\n' "$(one_line "$g_reason")" "$(one_line "$g_auth")" "$g_fscope" "$(one_line "$g_finstr")"
+    printf 'plan_change: %s\n' "${g_pchange:-no}"
+    printf 'previous_execution_state: "%s"\nprevious_handoff_state: "%s"\nprevious_knowledge_state: "%s"\n' "$(run_state "$g_d")" "$g_prev_hs" "$(section_value "$g_d" execution knowledge_state)"
+    printf 'previous_verification_patch_sha256: "%s"\nprevious_review_patch_sha256: "%s"\nprevious_code_done_patch_sha256: "%s"\n' "$(section_value "$g_d" handoff verification_patch_sha256)" "$(section_value "$g_d" handoff review_patch_sha256)" "$(section_value "$g_d" handoff code_done_patch_sha256)"
+    printf 'previous_completion_published: "%s"\nprevious_completion_receipt: "%s"\n' "$(section_value "$g_d" completion_report published)" "$(section_value "$g_d" completion_report receipt)"
+    printf 'timestamp: "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$g_gd/$g_name.yaml" || fail "could not write reopen record"
+  set_run_value "$g_id" execution state AMENDING
+  if section_key_present "$g_d" execution knowledge_state; then set_run_value "$g_id" execution knowledge_state not_started; fi
+  set_run_value "$g_id" handoff state IMPLEMENTING
+  set_run_value "$g_id" handoff verification_patch_sha256 PENDING
+  set_run_value "$g_id" handoff review_patch_sha256 PENDING
+  set_run_value "$g_id" handoff code_done_patch_sha256 PENDING
+  if section_key_present "$g_d" completion_report published; then set_run_value "$g_id" completion_report published false; set_run_value "$g_id" completion_report receipt PENDING; fi
+  ledger_append "$g_id" REOPEN "$g_prev_hs" IMPLEMENTING "$g_name authorized_by=$g_auth: $g_reason"
+  echo "run reopened: $g_id ($g_name); handoff IMPLEMENTING, execution AMENDING — implement the bounded fix, then REVIEW and QA again"
+}
+
 # --- Task Completion Report (task-system agnostic) -------------------------
 #
 # agent.sh never talks to a specific task tracker. It only (a) checks the
@@ -672,6 +1115,8 @@ required_report_headings() {
   printf '## Implementation Summary\n## Verification\n## Review Result\n## Known Limitations / Follow-up\n'
   [ -d "$(worker_evidence_dir "$(basename "$dir")")" ] && printf '## TDD Evidence\n'
   [ -d "$dir/amendments" ] && [ -n "$(ls -A "$dir/amendments" 2>/dev/null)" ] && printf '## Amendments\n'
+  ls "$dir"/gates/*-REOPEN.yaml >/dev/null 2>&1 && printf '## Reopen History\n'
+  return 0
 }
 validate_completion_report_structure() {
   id=$1 dir=$(run_dir "$1"); report="$dir/COMPLETION_REPORT.md"
@@ -690,6 +1135,7 @@ adapter_script() {
 publish_completion_report() {
   id=$1 adapter=${2:-markdown}; require_run "$id"; dir=$(run_dir "$id"); require_full_lifecycle
   [ "$(run_state "$dir")" = CODE_DONE ] || fail "completion report may only be published after CODE_DONE"
+  verify_seal "$id"
   validate_completion_report_structure "$id"
   script=$(adapter_script "$adapter") || return 1
   receipt=$("$script" publish "$id" "$dir/COMPLETION_REPORT.md") || fail "completion report publish failed via adapter: $adapter"
@@ -706,6 +1152,7 @@ publish_completion_report() {
   # would wrongly report the plan as stale for a run that is already
   # CODE_DONE and has nothing left to re-plan.
   set_task_source_revision "$dir"
+  if gates_enforced "$id"; then ledger_append "$id" publish-completion-report CODE_DONE CODE_DONE "$adapter $receipt"; fi
   echo "completion report published: $id via $adapter -> $receipt"
 }
 verify_completion_report() {
@@ -722,7 +1169,9 @@ knowledge_done() {
   case "$state" in KNOWLEDGE_DONE|not_applicable) ;; *) fail "invalid knowledge state: $state" ;; esac
   [ "$(run_state "$dir")" = CODE_DONE ] || fail "knowledge-done requires CODE_DONE first"
   section_key_present "$dir" execution knowledge_state || fail "run schema has no execution.knowledge_state field to set (pre-hardening run)"
+  verify_seal "$id"
   tmp=$dir/RUN.yaml.tmp; replace_section_value "$dir" execution knowledge_state "$state" "$tmp" && mv "$tmp" "$dir/RUN.yaml"
+  if gates_enforced "$id"; then ledger_append "$id" knowledge-done "$(section_value "$dir" handoff state)" "$state" ""; fi
   echo "knowledge state recorded: $id $state"
 }
 
@@ -814,8 +1263,11 @@ freeze() {
   id=$1; require_run "$id"; dir=$(run_dir "$id"); for f in TASK.md EVIDENCE.md PLAN.md RUN.yaml; do [ -f "$dir/$f" ] || fail "missing $f"; done
   [ "$(run_state "$dir")" != CODE_DONE ] || fail "cannot freeze completed run: $id"; [ "$(baseline_status "$dir")" = captured ] || fail "baseline required before freeze: $id"
   enforce_task_branch "$id"
+  verify_seal "$id"
   if freeze_hash_present "$dir"; then [ "${2:-}" = refreeze ] && [ -n "${3:-}" ] && [ -f "$dir/amendments/$3" ] || fail "existing freeze requires explicit amendment"; fi
-  set_task_source_revision "$dir"; tmp=$dir/RUN.yaml.tmp; replace_hashes "$dir" "$tmp"; mv "$tmp" "$dir/RUN.yaml"; echo "freeze recorded: $id"
+  set_task_source_revision "$dir"; tmp=$dir/RUN.yaml.tmp; replace_hashes "$dir" "$tmp"; mv "$tmp" "$dir/RUN.yaml"
+  if [ "${2:-}" = refreeze ] && gates_enforced "$id"; then refreeze_lifecycle "$id" "${3:-}"; fi
+  echo "freeze recorded: $id"
 }
 
 # Deterministic, ASCII-safe, hyphenated slug — no timestamps, no random suffixes.
@@ -1664,7 +2116,15 @@ branch_test() {
 }
 
 valid_role
-command=${1:-}; case "$command" in
+command=${1:-}
+# The independent reviewer/verifier roles are read-only observers that may
+# only record their own gate: they can never move the lifecycle, freeze, or
+# touch implementation evidence.
+case "$execution_role" in
+  independent_reviewer|independent_verifier)
+    case "$command" in role|status|effective|verify-*|freshness|validate|patch-fingerprint|gate) ;; *) fail "command denied for $execution_role" ;; esac ;;
+esac
+case "$command" in
   role) printf 'role=%s\n' "$execution_role" ;;
   status) id=$(active_run); echo "active_task=${id:-none}"; echo "implementation_allowed=$( [ -n "$id" ] && echo true || echo false )"; effective "$id" ;;
   effective) effective "${2:-}" ;;
@@ -1681,11 +2141,18 @@ command=${1:-}; case "$command" in
   delivery-check) require_full_lifecycle; delivery_check "${2:?usage: $0 delivery-check <TASK-ID>}" ;;
   worker-evidence) record_worker_evidence "${2:?usage: $0 worker-evidence <TASK-ID> <RED|GREEN|REFACTOR|FIX> <pass|fail>}" "${3:?usage: $0 worker-evidence <TASK-ID> <PHASE> <RESULT>}" "${4:?usage: $0 worker-evidence <TASK-ID> <PHASE> <RESULT>}" ;;
   verify-worker-evidence) verify_worker_evidence "${2:?usage: $0 verify-worker-evidence <TASK-ID>}" ;;
+  gate) record_gate "${2:?usage: $0 gate <TASK-ID> <REVIEW|QA> <pass|fail>}" "${3:?usage: $0 gate <TASK-ID> <REVIEW|QA> <pass|fail>}" "${4:?usage: $0 gate <TASK-ID> <REVIEW|QA> <pass|fail>}" ;;
+  amend) require_full_lifecycle; amend_run "${2:?usage: $0 amend <TASK-ID>}" ;;
+  patch-fingerprint) require_run "${2:?usage: $0 patch-fingerprint <TASK-ID>}"; task_patch_fingerprint "$2" ;;
+  window-open) require_full_lifecycle; window_open "${2:?usage: $0 window-open <TASK-ID>}" ;;
+  window-close) require_full_lifecycle; window_close "${2:?usage: $0 window-close <TASK-ID> <BEFORE> [EXIT-STATUS]}" "${3:-}" "${4:-0}" ;;
+  verify-gates) verify_lifecycle_gates "${2:?usage: $0 verify-gates <TASK-ID>}"; echo "lifecycle gates verified: $2" ;;
+  verify-seal) verify_seal "${2:?usage: $0 verify-seal <TASK-ID>}"; echo "lifecycle seal verified: $2" ;;
   knowledge-done) knowledge_done "${2:?usage: $0 knowledge-done <TASK-ID> [not_applicable]}" "${3:-KNOWLEDGE_DONE}" ;;
   publish-completion-report) publish_completion_report "${2:?usage: $0 publish-completion-report <TASK-ID> [ADAPTER]}" "${3:-markdown}" ;;
   verify-completion-report) verify_completion_report "${2:?usage: $0 verify-completion-report <TASK-ID>}" ;;
   validate) validate_run "${2:?usage: $0 validate <TASK-ID>}" ;;
-  test) require_full_lifecycle; fixture_test; branch_test; policy_test; standalone_test; worker_evidence_write_failure_test; knowledge_scope_test; delivery_check_knowledge_scope_test; validate_knowledge_scope_test; wiki_lint_self_scan_test ;;
+  test) require_full_lifecycle; fixture_test; sh "$root/scripts/lifecycle-test.sh"; branch_test; policy_test; standalone_test; worker_evidence_write_failure_test; knowledge_scope_test; delivery_check_knowledge_scope_test; validate_knowledge_scope_test; wiki_lint_self_scan_test ;;
   role-test) require_full_lifecycle; role_test ;;
-  *) echo "usage: $0 {role|status|effective|baseline|branch|freeze|refreeze|verify-freeze|verify-scope|verify-knowledge-scope|freshness|handoff|verify-handoff|delivery-check|worker-evidence|verify-worker-evidence|knowledge-done|publish-completion-report|verify-completion-report|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
+  *) echo "usage: $0 {role|status|effective|baseline|branch|freeze|refreeze|verify-freeze|verify-scope|verify-knowledge-scope|freshness|handoff|verify-handoff|delivery-check|worker-evidence|verify-worker-evidence|gate|amend|patch-fingerprint|window-open|window-close|verify-gates|verify-seal|knowledge-done|publish-completion-report|verify-completion-report|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
 esac
