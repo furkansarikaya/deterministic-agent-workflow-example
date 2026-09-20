@@ -12,6 +12,13 @@ task_source:
   type: local_markdown
   path: <REPOSITORY-RELATIVE-TASK-SOURCE.md>
   revision: PENDING
+  # Presence of this key makes `revision` a hash of the frozen task *contract*
+  # (the task source minus its `**Status:**` value and its published
+  # completion-report block), written only by freeze/refreeze; the file's
+  # location changes only via `agent.sh task-source-relocate`. See
+  # .agents/WORKFLOW.md's "Task-source contract". A run frozen before this policy
+  # (EXAMPLE-001) has no such key and keeps its whole-file semantics.
+  revision_scheme: contract
 
 execution:
   mode: deterministic

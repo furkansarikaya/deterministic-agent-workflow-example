@@ -6,10 +6,9 @@
 # agent implements its own RED/GREEN evidence directly, never via a worker.
 #
 # This is the ONLY sanctioned way to run implementation_worker under
-# orchestrated topology: it shells out to the real `codex exec` CLI (the
-# same binary/mechanism that actually performed KW-001's IMPLEMENT phase in
-# the KnowWeave sibling repository — see the network-sandbox lesson encoded
-# below) with AGENT_ROLE=implementation_worker set for that subprocess only.
+# orchestrated topology: it shells out to the real `codex exec` CLI (whose
+# workspace-write sandbox and network flag are the controls encoded below)
+# with AGENT_ROLE=implementation_worker set for that subprocess only.
 # It never falls back to doing the implementation itself: a missing `codex`
 # binary, a non-zero exit, or no output is a hard failure, and the caller (a
 # full_lifecycle orchestrator) must not treat that as license to implement

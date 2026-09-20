@@ -26,6 +26,18 @@ appends the report under an idempotent, delimited `## Completion Report`
 section and returns a `<path>#<sha256-of-report-body>` receipt. Re-publishing
 replaces the prior section rather than duplicating it.
 
+## Writing into the task source (contract-scheme runs)
+
+For a run whose `task_source.revision_scheme` is `contract` (see
+`.agents/WORKFLOW.md`, "Task-source contract"), `agent.sh` checks that the frozen
+task contract is fresh before it calls `publish` and again immediately after.
+The **only** part of a local Markdown task source an adapter may change is the one
+block `markdown.sh` writes: the `## Completion Report` heading, a blank line, the
+`<!-- COMPLETION-REPORT:BEGIN:<TASK-ID> -->` marker, the report, and the matching
+`END` marker. If `publish` changes anything else, `agent.sh` restores the task source
+byte for byte, records nothing, and fails. An adapter that does not write into the
+task source (an issue-tracker adapter, say) is unaffected.
+
 ## Adding another adapter
 
 Copy the two-operation contract above. A new adapter must not require any

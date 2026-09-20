@@ -10,8 +10,8 @@
 # (full_lifecycle, implementation_worker, independent_reviewer,
 # independent_verifier); the control plane has no vendor concept, so "Claude
 # standalone" and "Codex standalone" are the same full_lifecycle scenario, and
-# KnowWeave's orchestrated mapping (Claude orchestrates and reviews, Codex is
-# the implementation_worker) is the orchestrated scenarios below.
+# the orchestrated scenarios below map an orchestrator that also reviews to
+# full_lifecycle and the delegated implementer to implementation_worker.
 set -eu
 
 root=$(CDPATH= cd "$(dirname "$0")/.." && pwd)
@@ -71,10 +71,41 @@ finish_done() {
   A handoff LC DONE >/dev/null
 }
 
-# scaffold <topology> <independent:true|false> [gates:yes|no] — leaves the
-# fixture at handoff IMPLEMENTING (frozen), cwd inside it.
+# --- task-source contract helpers --------------------------------------------
+tc_status() { awk -v s="$2" '/^\*\*Status:\*\*/ { print "**Status:** " s; next } { print }' "$1" > "$1.tmp" && mv "$1.tmp" "$1"; }
+# Drive a freshly scaffolded fixture (frozen, IMPLEMENTING) to CODE_DONE in its topology.
+tc_to_code_done() {
+  if [ "$1" = orchestrated ]; then
+    worker RED fail impl_test.txt 'test: lookup returns the stored value'; worker GREEN pass impl.txt 'impl: lookup returns the stored value'
+    A handoff LC VERIFIED >/dev/null
+    gate_pass independent_reviewer REVIEW; A handoff LC REVIEWED >/dev/null
+    gate_pass independent_verifier QA; A handoff LC CODE_DONE >/dev/null
+  else
+    solo RED fail impl_test.txt 'test: lookup returns the stored value'; solo GREEN pass impl.txt 'impl: lookup returns the stored value'
+    A handoff LC VERIFIED >/dev/null
+    gate_pass full_lifecycle REVIEW; A handoff LC REVIEWED >/dev/null
+    gate_pass full_lifecycle QA; A handoff LC CODE_DONE >/dev/null
+  fi
+}
+tc_scaffold_done() { # topology — a contract-scheme fixture at CODE_DONE
+  if [ "$1" = orchestrated ]; then scaffold orchestrated true yes yes; else scaffold standalone false yes yes; fi
+  tc_to_code_done "$1"
+}
+tc_expect_msg() { # description pattern command... — the command must fail *for this reason*
+  d=$1 pat=$2; shift 2
+  if tm_out=$("$@" 2>&1); then echo "FAIL: $d (command succeeded)" >&2; exit 1; fi
+  printf '%s' "$tm_out" | grep -Fq -- "$pat" || { echo "FAIL: $d (rejected for another reason: $(printf '%s' "$tm_out" | tail -1))" >&2; exit 1; }
+}
+
+# scaffold <topology> <independent:true|false> [gates:yes|no] [contract:yes|no]
+# — leaves the fixture at handoff IMPLEMENTING (frozen), cwd inside it. With
+# contract=yes the run carries `task_source.revision_scheme: contract` and its
+# task file follows the todo/in-progress/done convention: committed under
+# tasks/todo/, then moved (uncommitted, before baseline) to tasks/in-progress/,
+# which is how a task file is normally started.
 scaffold() {
-  topo=$1 indep=$2 gates=${3:-yes}
+  topo=$1 indep=$2 gates=${3:-yes} contract=${4:-no}
+  tpath=tasks/LC.md; [ "$contract" = yes ] && tpath=tasks/in-progress/LC.md
   n_fx=$((n_fx + 1)); fx=$base/fx$n_fx
   mkdir -p "$fx/.agents/runs/LC/review" "$fx/.agents/modes" "$fx/.agents/task-integrations" "$fx/scripts" "$fx/tasks"
   cp "$root/scripts/agent.sh" "$root/scripts/worker-run.sh" "$fx/scripts/"; cp "$root/.agents/config.yaml" "$fx/.agents/"
@@ -87,7 +118,7 @@ scaffold() {
   printf '# Evidence\n' > "$fx/.agents/runs/LC/EVIDENCE.md"
   printf '%s\n' '---' 'scope:' '  - path: impl.txt' '    criteria: [AC-1]' '  - path: impl_test.txt' '    criteria: [AC-1]' '---' '# Plan' > "$fx/.agents/runs/LC/PLAN.md"
   {
-    printf '%s\n' 'repository:' '  base_sha: PENDING' 'task_source:' '  type: local_markdown' '  path: tasks/LC.md' '  revision: PENDING' \
+    printf '%s\n' 'repository:' '  base_sha: PENDING' 'task_source:' '  type: local_markdown' "  path: $tpath" '  revision: PENDING' \
       'execution:' '  mode: deterministic' '  profile: core' '  state: PLANNING' '  knowledge_state: not_started' "  topology: $topo" \
       'freeze:' '  task_sha256: PENDING' '  evidence_sha256: PENDING' '  plan_sha256: PENDING' '  policy_sha256: PENDING' \
       'baseline:' '  status: pending' \
@@ -97,16 +128,28 @@ scaffold() {
     [ "$gates" = yes ] && printf '%s\n' 'lifecycle_gates:' '  required: true'
     true
   } > "$fx/.agents/runs/LC/RUN.yaml"
+  if [ "$contract" = yes ]; then
+    awk '{ print } /^  revision: PENDING$/ { print "  revision_scheme: contract" }' "$fx/.agents/runs/LC/RUN.yaml" > "$fx/.agents/runs/LC/RUN.yaml.new" && mv "$fx/.agents/runs/LC/RUN.yaml.new" "$fx/.agents/runs/LC/RUN.yaml"
+  fi
   printf '# review\n' > "$fx/.agents/runs/LC/review/code-review.md"; printf '# verification\n' > "$fx/.agents/runs/LC/review/verification.md"; printf '# result\n' > "$fx/.agents/runs/LC/RESULT.md"
   cd "$fx"
   git init -q -b main; git config user.email lifecycle@example.invalid; git config user.name fixture
-  printf '# LC task\n' > tasks/LC.md; : > impl.txt; : > impl_test.txt
+  : > impl.txt; : > impl_test.txt
+  if [ "$contract" = yes ]; then
+    mkdir -p tasks/todo; printf '%s\n' '# LC task' '' '**Status:** todo' '' '## Requirements' '' '- lookup returns the documented default for an empty key' > tasks/todo/LC.md
+  else
+    printf '# LC task\n' > tasks/LC.md
+  fi
   git add -- .agents scripts tasks impl.txt impl_test.txt; git commit -qm baseline
+  if [ "$contract" = yes ]; then mkdir -p tasks/in-progress; git mv tasks/todo/LC.md tasks/in-progress/LC.md; tc_status tasks/in-progress/LC.md in-progress; fi
   A baseline LC >/dev/null; printf 'discovered\n' >> .agents/runs/LC/EVIDENCE.md; printf 'planned\n' >> .agents/runs/LC/PLAN.md
   A freeze LC >/dev/null; A handoff LC IMPLEMENTING >/dev/null
 }
 
 # --- scenarios ---------------------------------------------------------------
+
+# LC_ONLY=<substring> runs only the scenarios whose function name contains it.
+run_sc() { if [ -z "${LC_ONLY:-}" ] || printf '%s' "$1" | grep -q -- "$LC_ONLY"; then "$@"; fi; }
 
 # Standalone: full_lifecycle owns everything and may change application code
 # and tests directly at any point, including after review; independence is not
@@ -180,7 +223,8 @@ scenario_independence() {
   echo "lifecycle: independence enforcement passed"
 }
 
-# The orchestrated topology end to end, KnowWeave's intended model, with the
+# The orchestrated topology end to end (one agent orchestrates and reviews, a
+# separate implementation_worker writes the code), with the
 # sequence: worker implementation -> review FAIL -> worker fix -> review PASS
 # -> QA FAIL -> worker fix -> review PASS -> QA PASS -> CODE_DONE -> DONE ->
 # reopen -> worker fix -> review -> QA -> CODE_DONE -> DONE.
@@ -369,7 +413,7 @@ scenario_amend_plan_change() {
   echo "lifecycle: reopen with an authorized plan amendment passed"
 }
 
-# A run without the lifecycle_gates key (KW-001..KW-006, EXAMPLE-001) is
+# A run without the lifecycle_gates key (like EXAMPLE-001) is
 # grandfathered: none of the new behaviour applies and none of it is imposed.
 scenario_legacy() {
   scaffold orchestrated true no
@@ -421,13 +465,172 @@ STUB
   echo "lifecycle: worker-run.sh wrapper attestation passed"
 }
 
-scenario_standalone claude
-scenario_standalone codex short
-scenario_independence
-scenario_orchestrated_loop
-scenario_attribution
-scenario_worker_wrapper
-scenario_bounded_fix
-scenario_amend_plan_change
-scenario_legacy
+# --- task-source contract -----------------------------------------------------
+# Failure scenario: a run freezes its task file, and at completion the file
+# legitimately moves todo -> in-progress -> done and its Status changes.
+# `freshness` reports the moved file as stale, but if `publish-completion-report`
+# never checks freshness and re-hashes the whole file after the adapter appends
+# the report, *any* edit made before publish is absorbed and re-baselined.
+# A run with `task_source.revision_scheme: contract` freezes only the task
+# contract; the Status value and the published report block are bookkeeping;
+# the revision is written by freeze/refreeze alone; the location changes only
+# through `task-source-relocate`; and path and revision are sealed in the
+# lifecycle ledger.
+
+# The full completion sequence (move, Status change, relocation, publish) in
+# both topologies, with explicit bookkeeping semantics.
+scenario_task_contract_bookkeeping() {
+  topo=$1; tc_scaffold_done "$topo"; frozen=$(rv task_source revision)
+  mkdir -p tasks/done; git mv tasks/in-progress/LC.md tasks/done/LC.md; tc_status tasks/done/LC.md done
+  tc_expect_msg "a moved task source was accepted without being relocated" 'task-source-relocate' A freshness LC
+  expect_fail "knowledge-done accepted a moved, unrelocated task source" A knowledge-done LC not_applicable
+  A task-source-relocate LC tasks/done/LC.md >/dev/null
+  expect_state task_source path tasks/done/LC.md; expect_state task_source revision "$frozen"
+  A freshness LC >/dev/null; A verify-seal LC >/dev/null                # the move and the Status change are bookkeeping
+  finish_done
+  [ "$(rv task_source revision)" = "$frozen" ] || { echo "FAIL: publish re-baselined the frozen task contract" >&2; exit 1; }
+  grep -Fq '<!-- COMPLETION-REPORT:BEGIN:LC -->' tasks/done/LC.md
+  A freshness LC >/dev/null; A verify-seal LC >/dev/null; A verify-completion-report LC >/dev/null
+  A delivery-check LC >/dev/null; A validate LC >/dev/null
+  tc_expect_msg "relocation accepted after the completion report was published" 'receipt binds' A task-source-relocate LC tasks/elsewhere.md
+  cp tasks/done/LC.md "$base/published.md"
+  printf '%s\n' '- a requirement added after publication' >> tasks/done/LC.md
+  tc_expect_msg "a contract edit after the END marker was accepted" 'frozen task contract changed' A freshness LC
+  cp "$base/published.md" tasks/done/LC.md; A freshness LC >/dev/null
+  echo "lifecycle: task-source contract bookkeeping ($topo) passed"
+}
+
+# A contract edit made in place before publish is never absorbed.
+scenario_task_contract_edit() {
+  topo=$1; tc_scaffold_done "$topo"; frozen=$(rv task_source revision)
+  printf '%s\n' '- a requirement added after freeze' >> tasks/in-progress/LC.md
+  tc_expect_msg "an edited task contract passed freshness" 'frozen task contract changed' A freshness LC
+  tc_expect_msg "knowledge-done accepted an edited task contract" 'frozen task contract changed' A knowledge-done LC not_applicable
+  expect_state execution knowledge_state not_started
+  write_report
+  tc_expect_msg "publish accepted an edited task contract" 'frozen task contract changed' A publish-completion-report LC markdown
+  expect_state completion_report published false; expect_state task_source revision "$frozen"
+  if grep -Fq 'COMPLETION-REPORT:BEGIN' tasks/in-progress/LC.md; then echo "FAIL: the adapter ran against an edited task contract" >&2; exit 1; fi
+  tc_expect_msg "DONE accepted an edited task contract" 'frozen task contract changed' A handoff LC DONE
+  echo "lifecycle: task-source contract in-place edit ($topo) rejected"
+}
+
+# The same move with a contract change smuggled in alongside it, and
+# hand edits of the sealed path and revision.
+scenario_task_contract_laundering() {
+  tc_scaffold_done standalone; frozen=$(rv task_source revision)
+  mkdir -p tasks/done; git mv tasks/in-progress/LC.md tasks/done/LC.md; tc_status tasks/done/LC.md done
+  printf '%s\n' '- a requirement smuggled in with the move' >> tasks/done/LC.md
+  tc_expect_msg "a relocation absorbed an edited contract" 'differs from the frozen contract' A task-source-relocate LC tasks/done/LC.md
+  expect_state task_source path tasks/in-progress/LC.md; expect_state task_source revision "$frozen"
+  cp .agents/runs/LC/RUN.yaml "$base/RUN.saved"
+  awk '/^  path: tasks\/in-progress\/LC.md$/ { print "  path: tasks/done/LC.md"; next } { print }' "$base/RUN.saved" > .agents/runs/LC/RUN.yaml
+  tc_expect_msg "a hand-edited task source path was accepted" 'edited by hand' A verify-seal LC
+  expect_fail "knowledge-done ran over a hand-edited task source path" A knowledge-done LC not_applicable
+  cp "$base/RUN.saved" .agents/runs/LC/RUN.yaml; A verify-seal LC >/dev/null
+  awk '/^  revision: / { print "  revision: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""; next } { print }' "$base/RUN.saved" > .agents/runs/LC/RUN.yaml
+  tc_expect_msg "a hand-edited task revision was accepted" 'edited by hand' A verify-seal LC
+  cp "$base/RUN.saved" .agents/runs/LC/RUN.yaml; A verify-seal LC >/dev/null
+  echo "lifecycle: task-source contract laundering rejected"
+}
+
+# task-source-relocate is a move, validated before it changes anything.
+scenario_task_contract_relocate() {
+  tc_scaffold_done standalone
+  cp tasks/in-progress/LC.md tasks/copy.md
+  tc_expect_msg "a copy was accepted as a move" 'not a copy' A task-source-relocate LC tasks/copy.md
+  rm -f tasks/copy.md
+  tc_expect_msg "the recorded path was accepted as a relocation" 'already recorded' A task-source-relocate LC tasks/in-progress/LC.md
+  tc_expect_msg "an absolute path was accepted" 'invalid task source path' A task-source-relocate LC /etc/hosts
+  tc_expect_msg "a parent-directory path was accepted" 'invalid task source path' A task-source-relocate LC tasks/../LC.md
+  git mv tasks/in-progress/LC.md tasks/moved.md
+  tc_expect_msg "a missing target was accepted" 'missing or non-regular' A task-source-relocate LC tasks/nowhere.md
+  ln -s moved.md tasks/link.md
+  tc_expect_msg "a symlink target was accepted" 'symlink' A task-source-relocate LC tasks/link.md
+  tc_expect_msg "an independent reviewer relocated the task source" 'denied' AS independent_reviewer task-source-relocate LC tasks/moved.md
+  tc_expect_msg "an independent verifier relocated the task source" 'denied' AS independent_verifier task-source-relocate LC tasks/moved.md
+  tc_expect_msg "an implementation worker relocated the task source" 'denied' AS implementation_worker task-source-relocate LC tasks/moved.md
+  A task-source-relocate LC tasks/moved.md >/dev/null; expect_state task_source path tasks/moved.md
+  A freshness LC >/dev/null; A verify-seal LC >/dev/null
+  echo "lifecycle: task-source relocation checks passed"
+}
+
+# An adapter that touches anything but the report block cannot re-baseline or
+# change the contract: the task source is restored and nothing is recorded.
+scenario_task_contract_adapter() {
+  tc_scaffold_done standalone; frozen=$(rv task_source revision)
+  cp tasks/in-progress/LC.md "$base/pre-publish.md"
+  A knowledge-done LC not_applicable >/dev/null; write_report
+  printf '%s\n' '#!/bin/sh' 'set -eu' 'root=$(CDPATH= cd "$(dirname "$0")/../.." && pwd)' \
+    'path=$(sed -n "s/^  path: //p" "$root/.agents/runs/$2/RUN.yaml" | head -1)' \
+    'case "$1" in publish) printf "%s\n" "- a requirement the adapter added" >> "$root/$path"; printf "%s#feedface\n" "$path" ;; verify) exit 0 ;; esac' \
+    > .agents/task-integrations/evil.sh
+  chmod +x .agents/task-integrations/evil.sh
+  tc_expect_msg "an adapter that changed the contract was accepted" 'outside the completion-report block' A publish-completion-report LC evil
+  cmp -s tasks/in-progress/LC.md "$base/pre-publish.md" || { echo "FAIL: the task source was not restored byte for byte" >&2; exit 1; }
+  expect_state completion_report published false; expect_state task_source revision "$frozen"
+  A freshness LC >/dev/null
+  rm -f .agents/task-integrations/evil.sh
+  A publish-completion-report LC markdown >/dev/null; A handoff LC DONE >/dev/null
+  expect_state task_source revision "$frozen"
+  echo "lifecycle: task-source contract adapter confinement passed"
+}
+
+# What the projection treats as bookkeeping (accepted) and as contract (rejected).
+scenario_task_contract_projection() {
+  scaffold standalone false yes yes; f=tasks/in-progress/LC.md; cp "$f" "$base/orig.md"
+  ok() { cp "$base/orig.md" "$f"; "$@"; A freshness LC >/dev/null 2>&1 || { echo "FAIL: bookkeeping change rejected: $*" >&2; exit 1; }; }
+  bad() { d=$1; shift; cp "$base/orig.md" "$f"; "$@"; if A freshness LC >/dev/null 2>&1; then echo "FAIL: contract change accepted: $d" >&2; exit 1; fi; }
+  block() { printf '\n## Completion Report\n\n<!-- COMPLETION-REPORT:BEGIN:%s -->\nreport\n<!-- COMPLETION-REPORT:END:%s -->\n' "$1" "$1" >> "$f"; }
+  A freshness LC >/dev/null
+  ok tc_status "$f" done
+  ok tc_status "$f" 'anything at all, even several words'
+  ok sh -c "printf '\n\n\n' >> '$f'"
+  ok block LC
+  bad "text after the END marker" sh -c "printf '\n## Completion Report\n\n<!-- COMPLETION-REPORT:BEGIN:LC -->\nr\n<!-- COMPLETION-REPORT:END:LC -->\n- extra requirement\n' >> '$f'"
+  bad "a second report block" sh -c "printf '\n## Completion Report\n\n<!-- COMPLETION-REPORT:BEGIN:LC -->\nr\n<!-- COMPLETION-REPORT:END:LC -->\n## Completion Report\n\n<!-- COMPLETION-REPORT:BEGIN:LC -->\nr2\n<!-- COMPLETION-REPORT:END:LC -->\n' >> '$f'"
+  bad "a block for another task" block OTHER
+  bad "a completion-report heading without markers" sh -c "printf '\n## Completion Report\n\nnotes\n' >> '$f'"
+  bad "a block that is never closed" sh -c "printf '\n## Completion Report\n\n<!-- COMPLETION-REPORT:BEGIN:LC -->\nr\n' >> '$f'"
+  bad "an edited requirement" sh -c "sed 's/documented default/other default/' '$f' > '$f.new' && mv '$f.new' '$f'"
+  bad "a removed requirement" sh -c "grep -v 'documented default' '$f' > '$f.new'; mv '$f.new' '$f'"
+  bad "a body line that only looks like Status" sh -c "printf 'Status: done\n' >> '$f'"
+  cp "$base/orig.md" "$f"; A freshness LC >/dev/null
+  cp .agents/runs/LC/RUN.yaml "$base/RUN.saved"
+  sed 's/revision_scheme: contract/revision_scheme: bogus/' "$base/RUN.saved" > .agents/runs/LC/RUN.yaml
+  tc_expect_msg "an unknown revision scheme was accepted" 'unsupported task_source.revision_scheme' A freshness LC
+  cp "$base/RUN.saved" .agents/runs/LC/RUN.yaml
+  echo "lifecycle: task-source contract projection passed"
+}
+
+# Runs frozen before the contract scheme (no revision_scheme key) keep the original
+# whole-file semantics exactly, and are never re-pointed.
+scenario_task_contract_legacy() {
+  scaffold standalone false yes no; tc_to_code_done standalone; frozen=$(rv task_source revision)
+  [ -z "$(rv task_source revision_scheme)" ]
+  tc_expect_msg "task-source-relocate accepted a pre-contract run" 'pre-contract' A task-source-relocate LC tasks/x.md
+  finish_done
+  [ "$(rv task_source revision)" != "$frozen" ] || { echo "FAIL: a pre-contract run no longer refreshes its whole-file revision at publish" >&2; exit 1; }
+  A freshness LC >/dev/null; A delivery-check LC >/dev/null; A validate LC >/dev/null
+  echo "lifecycle: pre-contract task-source semantics unchanged passed"
+}
+
+run_sc scenario_standalone claude
+run_sc scenario_standalone codex short
+run_sc scenario_independence
+run_sc scenario_orchestrated_loop
+run_sc scenario_attribution
+run_sc scenario_worker_wrapper
+run_sc scenario_bounded_fix
+run_sc scenario_amend_plan_change
+run_sc scenario_legacy
+run_sc scenario_task_contract_bookkeeping standalone
+run_sc scenario_task_contract_bookkeeping orchestrated
+run_sc scenario_task_contract_edit standalone
+run_sc scenario_task_contract_edit orchestrated
+run_sc scenario_task_contract_laundering
+run_sc scenario_task_contract_relocate
+run_sc scenario_task_contract_adapter
+run_sc scenario_task_contract_projection
+run_sc scenario_task_contract_legacy
 echo 'agent lifecycle tests passed'

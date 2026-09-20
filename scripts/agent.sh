@@ -143,10 +143,58 @@ replace_hashes() {
     { print }
   ' "$dir/RUN.yaml" > "$target"
 }
+# The frozen task contract. A run whose task_source carries
+# `revision_scheme: contract` records and checks a *projection* of its local
+# Markdown task source instead of the whole file: the value of every
+# `**Status:**` line and the single completion-report block the markdown
+# adapter appends (its `## Completion Report` heading through the END marker) are
+# lifecycle bookkeeping and are projected out; trailing blank lines are ignored;
+# everything else is the contract. The recorded revision is then written by
+# `freeze`/`refreeze` only (refreeze needs an amendment) — never by publish — and
+# the task source's location changes only through `task-source-relocate`. A run
+# without the key keeps the original whole-file hash exactly (pre-contract runs
+# are grandfathered, like every earlier policy key).
+task_source_contract_enforced() {
+  section_key_present "$(run_dir "$1")" task_source revision_scheme && [ "$(section_value "$(run_dir "$1")" task_source type)" = local_markdown ]
+}
+# A present-but-unknown scheme is an error, never a silent fall back to the
+# whole-file hash.
+task_source_scheme_check() {
+  task_source_contract_enforced "$(basename "$1")" || return 0
+  [ "$(section_value "$1" task_source revision_scheme)" = contract ] || fail "unsupported task_source.revision_scheme: $(section_value "$1" task_source revision_scheme)"
+}
+task_source_contract_hash() {
+  awk -v id="$1" '
+    { line[NR] = $0 }
+    END {
+      begin = "<!-- COMPLETION-REPORT:BEGIN:" id " -->"; endm = "<!-- COMPLETION-REPORT:END:" id " -->"
+      n = 0; stripped = 0
+      for (i = 1; i <= NR; i++) {
+        if (!stripped && line[i] == "## Completion Report") {
+          j = i + 1
+          while (j <= NR && line[j] ~ /^[[:space:]]*$/) j++
+          if (j <= NR && line[j] == begin) {
+            for (k = j + 1; k <= NR && line[k] != endm; k++) { }
+            if (k <= NR) { i = k; stripped = 1; continue }
+          }
+        }
+        out = line[i]
+        if (out ~ /^\*\*Status:\*\*/) out = "**Status:**"
+        kept[++n] = out
+      }
+      while (n > 0 && kept[n] ~ /^[[:space:]]*$/) n--
+      for (i = 1; i <= n; i++) print kept[i]
+    }
+  ' "$2" | shasum -a 256 | awk '{print $1}'
+}
+task_source_revision_of() {
+  dir=$1 source=$2
+  if task_source_contract_enforced "$(basename "$dir")"; then task_source_contract_hash "$(basename "$dir")" "$source"; else hash_file "$source"; fi
+}
 set_task_source_revision() {
   dir=$1 type=$(section_value "$dir" task_source type)
   case "$type" in
-    local_markdown) source=$(local_task_source "$dir") || return 1; replace_section_value "$dir" task_source revision "$(hash_file "$source")" "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml" ;;
+    local_markdown) task_source_scheme_check "$dir" || return 1; source=$(local_task_source "$dir") || return 1; replace_section_value "$dir" task_source revision "$(task_source_revision_of "$dir" "$source")" "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml" ;;
     none) [ "$(section_value "$dir" task_source revision)" = not_applicable ] || fail "task source none requires revision: not_applicable" ;;
     *) fail "task source adapter unavailable: ${type:-missing}" ;;
   esac
@@ -156,8 +204,12 @@ local_task_source() {
   case "$path" in ''|/*|*'..'*|*'//'*) fail "invalid local Markdown task source path";; esac
   source=$root/$path
   [ ! -L "$source" ] || fail "task source must not be a symlink: $path"
-  [ -f "$source" ] || fail "task source missing or non-regular: $path"
+  [ -f "$source" ] || fail "task source missing or non-regular: $path$(task_source_moved_hint "$dir")"
   printf '%s\n' "$source"
+}
+task_source_moved_hint() {
+  task_source_contract_enforced "$(basename "$1")" && printf " (if the task file was moved, record it with 'agent.sh task-source-relocate %s <NEW-PATH>')" "$(basename "$1")"
+  return 0
 }
 verify_freshness() {
   id=$1; require_run "$id"; dir=$(run_dir "$id")
@@ -167,7 +219,13 @@ verify_freshness() {
   [ "$base" = "$head" ] || fail "stale plan: repository.base_sha changed ($base -> $head); amendment and refreeze required"
   type=$(section_value "$dir" task_source type); revision=$(section_value "$dir" task_source revision)
   case "$type:$revision" in
-    local_markdown:*) source=$(local_task_source "$dir") || return 1; [ "$revision" = "$(hash_file "$source")" ] || fail "stale plan: task source revision changed; amendment and refreeze required" ;;
+    local_markdown:*)
+      task_source_scheme_check "$dir" || return 1; source=$(local_task_source "$dir") || return 1
+      if task_source_contract_enforced "$id"; then
+        [ "$revision" = "$(task_source_revision_of "$dir" "$source")" ] || fail "stale plan: the frozen task contract changed (the Status value and the published completion-report block are bookkeeping and excluded; nothing else may change); amendment and refreeze required"
+      else
+        [ "$revision" = "$(hash_file "$source")" ] || fail "stale plan: task source revision changed; amendment and refreeze required"
+      fi ;;
     none:not_applicable) : ;;
     *) fail "task source revision unavailable or unsupported; amendment or adapter required" ;;
   esac
@@ -238,7 +296,7 @@ record_handoff() {
   # VERIFY/REVIEW is still rejected exactly as before this existed.
   allow_knowledge=0; [ "$phase" = DONE ] && allow_knowledge=1
   verify_freshness "$id"; verify_scope "$id" "$allow_knowledge"
-  # A hand edit of RUN.yaml lifecycle fields (the KW-006 state rewinds) is
+  # A hand edit of RUN.yaml lifecycle fields (a manual rewind of the lifecycle state) is
   # detected before any further transition is layered on top of it.
   verify_seal "$id"
   patch=$(task_patch_fingerprint "$id")
@@ -685,7 +743,7 @@ verify_worker_evidence() {
 #
 # Everything in this section is gated on `gates_enforced`: a run whose
 # RUN.yaml carries the `lifecycle_gates:` key block. A run frozen before this
-# policy existed (KW-001..KW-006, EXAMPLE-001) has no such block, is never
+# policy existed (EXAMPLE-001) has no such block, is never
 # retroactively edited to add one, and keeps its original semantics exactly —
 # the same grandfather pattern as `repository.task_branch` and
 # `worker_evidence:`. New variables below use a g_ prefix on purpose: this
@@ -724,6 +782,7 @@ lifecycle_digest() {
   { _lv "$g_d" execution state; _lv "$g_d" execution knowledge_state; _lv "$g_d" handoff state
     _lv "$g_d" handoff verification_patch_sha256; _lv "$g_d" handoff review_patch_sha256; _lv "$g_d" handoff code_done_patch_sha256
     _lv "$g_d" completion_report published; _lv "$g_d" completion_report adapter; _lv "$g_d" completion_report receipt
+    if task_source_contract_enforced "$1"; then _lv "$g_d" task_source revision_scheme; _lv "$g_d" task_source path; _lv "$g_d" task_source revision; fi
   } | shasum -a 256 | awk '{print $1}'
 }
 ledger_append() {
@@ -741,8 +800,8 @@ ledger_append() {
 # fields no longer match the last sealed digest, something other than this
 # script changed them. This cannot stop a determined same-user forger from
 # re-sealing a rewritten ledger (see .agents/ENFORCEMENT.md "Evidence
-# strength") — it makes a hand edit of lifecycle state, the KW-006 failure
-# mode, mechanically detectable instead of silently accepted.
+# strength") — it makes a hand edit of lifecycle state, the manual-rewind
+# failure mode, mechanically detectable instead of silently accepted.
 verify_seal() {
   g_id=$1; gates_enforced "$g_id" || return 0
   g_d=$(run_dir "$g_id"); g_file=$(ledger_file "$g_id")
@@ -1051,7 +1110,7 @@ refreeze_lifecycle() {
   ledger_append "$g_id" refreeze "$g_hs" "$g_to" "amendment $g_amend"
 }
 
-# The scripted reopen of a CODE_DONE/DONE run (the transition KW-006 lacked).
+# The scripted reopen of a CODE_DONE/DONE run (the only sanctioned way to reopen one).
 # Fields on stdin: reason, fix_scope, fix_instruction, authorized_by. Frozen
 # TASK/EVIDENCE/PLAN are untouched; if the plan itself must change, follow with
 # an amendment file and `refreeze` as usual (execution.state is AMENDING, so
@@ -1138,20 +1197,42 @@ publish_completion_report() {
   verify_seal "$id"
   validate_completion_report_structure "$id"
   script=$(adapter_script "$adapter") || return 1
-  receipt=$("$script" publish "$id" "$dir/COMPLETION_REPORT.md") || fail "completion report publish failed via adapter: $adapter"
-  [ -n "$receipt" ] || fail "adapter $adapter returned an empty receipt"
+  # Contract-scheme run: publishing is bookkeeping, never a re-baseline. The
+  # frozen contract must be fresh before the adapter writes, the adapter may
+  # only change the projected-out report block, and the recorded revision is
+  # not touched here. Any deviation restores the task source byte for byte and
+  # fails closed before anything is recorded.
+  contract_backup=''
+  if task_source_contract_enforced "$id"; then
+    verify_freshness "$id" >/dev/null
+    contract_backup=$(mktemp "${TMPDIR:-/tmp}/agent-task-source.XXXXXX"); cp -p "$(local_task_source "$dir")" "$contract_backup"
+  fi
+  if ! receipt=$("$script" publish "$id" "$dir/COMPLETION_REPORT.md"); then
+    [ -z "$contract_backup" ] || { cp -p "$contract_backup" "$(local_task_source "$dir")"; rm -f "$contract_backup"; }
+    fail "completion report publish failed via adapter: $adapter"
+  fi
+  [ -n "$receipt" ] || { [ -z "$contract_backup" ] || { cp -p "$contract_backup" "$(local_task_source "$dir")"; rm -f "$contract_backup"; }; fail "adapter $adapter returned an empty receipt"; }
+  if [ -n "$contract_backup" ]; then
+    # A separate process on purpose: a function called in an `if` condition runs
+    # with `set -e` disabled, so verify_freshness's inner `fail`s would be lost.
+    if ! "$root/scripts/agent.sh" freshness "$id" >/dev/null 2>&1; then
+      cp -p "$contract_backup" "$(local_task_source "$dir")"; rm -f "$contract_backup"
+      fail "adapter $adapter changed the frozen task contract outside the completion-report block; the task source was restored and nothing was recorded"
+    fi
+    rm -f "$contract_backup"
+  fi
   tmp=$dir/RUN.yaml.tmp
   replace_section_value "$dir" completion_report adapter "$adapter" "$tmp" && mv "$tmp" "$dir/RUN.yaml"
   replace_section_value "$dir" completion_report published true "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml"
   replace_section_value "$dir" completion_report receipt "$receipt" "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml"
-  # An adapter (e.g. markdown.sh) may append the report into the task's own
-  # task_source.path file, changing its hash. That specific, narrowly-scoped
-  # write is this command's own authorized effect (never a scope drift being
-  # masked), so the recorded freshness revision is refreshed to match it —
-  # otherwise every later handoff call's unconditional verify_freshness
-  # would wrongly report the plan as stale for a run that is already
-  # CODE_DONE and has nothing left to re-plan.
-  set_task_source_revision "$dir"
+  # Pre-contract runs only (no task_source.revision_scheme): an adapter (e.g.
+  # markdown.sh) appends the report into the task's own task_source.path file,
+  # changing its whole-file hash, so the recorded revision was refreshed to
+  # match. That refresh also re-baselined any other edit made before publish
+  # (an edit of the task file before publish was silently absorbed), which is why
+  # contract-scheme runs never do it: their
+  # revision hashes the contract, which the report block cannot change.
+  task_source_contract_enforced "$id" || set_task_source_revision "$dir"
   if gates_enforced "$id"; then ledger_append "$id" publish-completion-report CODE_DONE CODE_DONE "$adapter $receipt"; fi
   echo "completion report published: $id via $adapter -> $receipt"
 }
@@ -1164,12 +1245,38 @@ verify_completion_report() {
   "$script" verify "$id" "$receipt" || fail "completion report publication could not be verified: $id"
   echo "completion report publication verified: $id"
 }
+# The one sanctioned way to change where a contract-scheme run's task source
+# lives (the task file moves todo/ -> in-progress/ -> done/).
+# It is a move, not a re-baseline: the frozen contract at the new location must
+# hash exactly to the revision recorded by freeze, the old location must be
+# gone, and nothing may change once the completion report is published (its
+# receipt binds the location). The new path is sealed into the lifecycle ledger.
+task_source_relocate() {
+  id=$1 new=$2; require_run "$id"; dir=$(run_dir "$id"); require_full_lifecycle
+  task_source_contract_enforced "$id" || fail "task-source-relocate requires task_source.revision_scheme: contract; a pre-contract run keeps its original whole-file semantics and is never re-pointed"
+  task_source_scheme_check "$dir" || return 1
+  freeze_hash_present "$dir" || fail "the task source can be relocated only after the run is frozen"
+  [ "$(section_value "$dir" completion_report published)" != true ] || fail "cannot relocate the task source after the completion report is published: its receipt binds the location"
+  verify_freeze "$id" >/dev/null; enforce_task_branch "$id"; verify_seal "$id"
+  case "$new" in ''|/*|*'..'*|*'//'*) fail "invalid task source path: $new" ;; esac
+  old=$(section_value "$dir" task_source path)
+  [ "$new" != "$old" ] || fail "the task source is already recorded at $old"
+  { [ ! -e "$root/$old" ] && [ ! -L "$root/$old" ]; } || fail "the task source still exists at $old: a relocation is a move, not a copy"
+  [ ! -L "$root/$new" ] || fail "task source must not be a symlink: $new"
+  [ -f "$root/$new" ] || fail "task source missing or non-regular: $new"
+  [ "$(section_value "$dir" task_source revision)" = "$(task_source_contract_hash "$id" "$root/$new")" ] || fail "the task contract at $new differs from the frozen contract (only the Status value and the published completion-report block may differ); amendment and refreeze required"
+  replace_section_value "$dir" task_source path "$new" "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml"
+  if gates_enforced "$id"; then ledger_append "$id" task-source-relocate "$(section_value "$dir" handoff state)" "$(section_value "$dir" handoff state)" "$old -> $new"; fi
+  echo "task source relocated: $id $old -> $new"
+}
+
 knowledge_done() {
   id=$1 state=${2:-KNOWLEDGE_DONE}; require_run "$id"; dir=$(run_dir "$id"); require_full_lifecycle
   case "$state" in KNOWLEDGE_DONE|not_applicable) ;; *) fail "invalid knowledge state: $state" ;; esac
   [ "$(run_state "$dir")" = CODE_DONE ] || fail "knowledge-done requires CODE_DONE first"
   section_key_present "$dir" execution knowledge_state || fail "run schema has no execution.knowledge_state field to set (pre-hardening run)"
   verify_seal "$id"
+  ! task_source_contract_enforced "$id" || verify_freshness "$id" >/dev/null
   tmp=$dir/RUN.yaml.tmp; replace_section_value "$dir" execution knowledge_state "$state" "$tmp" && mv "$tmp" "$dir/RUN.yaml"
   if gates_enforced "$id"; then ledger_append "$id" knowledge-done "$(section_value "$dir" handoff state)" "$state" ""; fi
   echo "knowledge state recorded: $id $state"
@@ -1370,7 +1477,7 @@ role_test() {
 # Proves the worker-evidence / TDD / completion-report enforcement under
 # execution.topology: orchestrated: a full_lifecycle orchestrator cannot
 # silently implement application code and advance past IMPLEMENT (the
-# concrete KW-002 bypass), evidence is bound to the current task/freeze
+# bypass this policy closes), evidence is bound to the current task/freeze
 # (stale and cross-task evidence are rejected), evidence must be authored by
 # the role orchestrated topology expects — implementation_worker, not the
 # orchestrator itself — a worker cannot record evidence for an out-of-scope
@@ -1410,8 +1517,8 @@ policy_test() {
     ./scripts/agent.sh freeze POLICY
     ./scripts/agent.sh handoff POLICY IMPLEMENTING
 
-    # A full_lifecycle session implements the change directly (exactly the
-    # KW-002 pattern) and then tries to advance the lifecycle as though
+    # A full_lifecycle session implements the change directly (the bypass
+    # this test guards against) and then tries to advance the lifecycle as though
     # delegation had occurred. This must be rejected: no worker evidence
     # exists yet for either scope path.
     printf 'implemented directly by full_lifecycle\n' > impl.txt
@@ -1529,7 +1636,7 @@ policy_test() {
   echo 'agent policy tests passed'
 }
 
-# Regression test for a real observed worker-evidence sandbox failure: `codex
+# Regression test for the worker-evidence sandbox failure: `codex
 # exec --sandbox workspace-write` denied writes under the run's own
 # `.agents/runs/<ID>/worker-evidence/` directory, and record_worker_evidence
 # printed a false "recorded" success message instead of failing closed.
@@ -1575,7 +1682,7 @@ worker_evidence_write_failure_test() {
     printf '%s\n' "$err_out" | grep -qi "recorded" && { echo "FAIL: a denied write must not print a success-sounding 'recorded' message: $err_out" >&2; exit 1; }
     [ -z "$(ls -A .agents/runs/WRITEFAIL/worker-evidence 2>/dev/null)" ] || { echo "FAIL: a partial/empty evidence file was left behind after a denied write" >&2; exit 1; }
 
-    # Once the directory is writable again (the real fix: scripts/worker-run.sh
+    # Once the directory is writable again (the fix: scripts/worker-run.sh
     # passing --add-dir for exactly this directory), the identical command
     # succeeds and leaves a real, non-empty, well-formed evidence file.
     AGENT_ROLE=implementation_worker sh -c "printf 'command: go test ./...\ntarget: impl.txt\nexpected_failure: TestImpl fails: lookup method does not exist yet, specifically\n' | ./scripts/agent.sh worker-evidence WRITEFAIL RED fail"
@@ -1584,7 +1691,7 @@ worker_evidence_write_failure_test() {
   echo 'agent worker-evidence write-failure tests passed'
 }
 
-# Regression test for a real observed DONE-transition bug: a legitimate
+# Regression test for the DONE-transition failure: a legitimate
 # Transaction B (knowledge transaction) write under docs/wiki/** was rejected by DONE's
 # scope check as an "unexpected or unmapped task-introduced path", because
 # verify_scope only ever recognized PLAN.md's frozen application scope.
@@ -1651,8 +1758,8 @@ knowledge_scope_test() {
     if ./scripts/agent.sh handoff KNOWSCOPE DONE; then echo "FAIL: knowledge_state=not_applicable was accepted despite a real knowledge-scope diff" >&2; exit 1; fi
 
     # (4) The corrected, legitimate case: the knowledge transaction actually
-    # happened and is recorded KNOWLEDGE_DONE — this is the real bug scenario
-    # this test reproduces. verify-knowledge-scope reports success directly, and DONE
+    # happened and is recorded KNOWLEDGE_DONE — this is the scenario the
+    # test guards. verify-knowledge-scope reports success directly, and DONE
     # (once the completion report is published/verified, matching every
     # other run's DONE gate) now legitimately succeeds.
     ./scripts/agent.sh knowledge-done KNOWSCOPE KNOWLEDGE_DONE
@@ -1675,12 +1782,12 @@ knowledge_scope_test() {
   echo 'agent knowledge-scope tests passed'
 }
 
-# Regression test for a real observed delivery-check bug: DONE correctly accepted
+# Regression test for the delivery-check failure: DONE correctly accepted
 # a legitimate knowledge transaction, but `agent.sh delivery-check` (called
-# afterward, as a real delivery attempt would) still ran the strict, knowledge-blind
+# afterward, as a delivery attempt is) still ran the strict, knowledge-blind
 # `verify_scope`/`verify_handoff` and rejected the same already-accepted
 # `docs/wiki/**` diff as an unexpected application-scope path. Proves the full
-# real-world sequence — CODE_DONE -> KNOWLEDGE_DONE with a legitimate wiki
+# sequence — CODE_DONE -> KNOWLEDGE_DONE with a legitimate wiki
 # change -> DONE -> delivery-check succeeds — plus that delivery-check still
 # fails closed on an unauthorized application change and on an invalid/
 # inconsistent knowledge-transaction state, exactly like DONE does.
@@ -1740,7 +1847,7 @@ delivery_check_knowledge_scope_test() {
     ./scripts/agent.sh knowledge-done DELIVERKNOW not_applicable
     if ./scripts/agent.sh delivery-check DELIVERKNOW; then echo "FAIL: delivery-check accepted knowledge_state=not_applicable despite a real diff" >&2; exit 1; fi
 
-    # (4) The real observed sequence this test reproduces: a legitimate knowledge transaction is
+    # (4) The sequence this test guards: a legitimate knowledge transaction is
     # recorded KNOWLEDGE_DONE, the completion report is published/verified,
     # DONE is reached — and delivery-check, run *afterward*, now succeeds
     # instead of re-rejecting the same diff DONE already accepted.
@@ -1762,7 +1869,7 @@ delivery_check_knowledge_scope_test() {
   echo 'agent delivery-check knowledge-scope tests passed'
 }
 
-# Regression test for a real observed `agent.sh validate` bug: unlike DONE
+# Regression test for the `agent.sh validate` failure: unlike DONE
 # and delivery-check (both independently fixed to run verify_scope/
 # verify_handoff with allow_knowledge=1 plus verify_knowledge_scope for a
 # legitimate Transaction B), `validate` still called verify_handoff in
@@ -1775,7 +1882,7 @@ delivery_check_knowledge_scope_test() {
 # fails validate closed; (2) a knowledge-scope diff with no recorded
 # transaction still fails closed; (3) a mismatched not_applicable still
 # fails closed; (4) a genuine KNOWLEDGE_DONE transaction now legitimately
-# passes validate, both before and after the real DONE handoff transition;
+# passes validate, both before and after the DONE handoff transition;
 # (5) KNOWLEDGE_DONE with zero actual knowledge-scope diffs still fails
 # closed. Also confirms validate's pre-existing, unrelated behavior is
 # untouched: it still requires COMPLETION_REPORT.md up front when
@@ -1851,7 +1958,7 @@ validate_knowledge_scope_test() {
     # (4) The corrected, legitimate case: the knowledge transaction actually
     # happened and is recorded KNOWLEDGE_DONE — validate now succeeds
     # instead of re-rejecting the same diff DONE (below) will independently
-    # accept. Proven both before and after the real DONE handoff transition.
+    # accept. Proven both before and after the DONE handoff transition.
     ./scripts/agent.sh knowledge-done VALIDATEKNOW KNOWLEDGE_DONE
     ./scripts/agent.sh validate VALIDATEKNOW
     ./scripts/agent.sh handoff VALIDATEKNOW DONE
@@ -1866,7 +1973,7 @@ validate_knowledge_scope_test() {
   echo 'agent validate knowledge-scope tests passed'
 }
 
-# Regression test for a real observed `scripts/wiki-lint.sh` bug: its
+# Regression test for a `scripts/wiki-lint.sh` failure: its
 # whole-vault scans (task-reference grep, duplicate-title find, wikilink
 # grep, and the per-page orphan-check grep) each re-scanned the script's
 # own previously-generated docs/wiki/lint-report.md, since only the
@@ -2148,11 +2255,12 @@ case "$command" in
   window-close) require_full_lifecycle; window_close "${2:?usage: $0 window-close <TASK-ID> <BEFORE> [EXIT-STATUS]}" "${3:-}" "${4:-0}" ;;
   verify-gates) verify_lifecycle_gates "${2:?usage: $0 verify-gates <TASK-ID>}"; echo "lifecycle gates verified: $2" ;;
   verify-seal) verify_seal "${2:?usage: $0 verify-seal <TASK-ID>}"; echo "lifecycle seal verified: $2" ;;
+  task-source-relocate) task_source_relocate "${2:?usage: $0 task-source-relocate <TASK-ID> <NEW-PATH>}" "${3:?usage: $0 task-source-relocate <TASK-ID> <NEW-PATH>}" ;;
   knowledge-done) knowledge_done "${2:?usage: $0 knowledge-done <TASK-ID> [not_applicable]}" "${3:-KNOWLEDGE_DONE}" ;;
   publish-completion-report) publish_completion_report "${2:?usage: $0 publish-completion-report <TASK-ID> [ADAPTER]}" "${3:-markdown}" ;;
   verify-completion-report) verify_completion_report "${2:?usage: $0 verify-completion-report <TASK-ID>}" ;;
   validate) validate_run "${2:?usage: $0 validate <TASK-ID>}" ;;
   test) require_full_lifecycle; fixture_test; sh "$root/scripts/lifecycle-test.sh"; branch_test; policy_test; standalone_test; worker_evidence_write_failure_test; knowledge_scope_test; delivery_check_knowledge_scope_test; validate_knowledge_scope_test; wiki_lint_self_scan_test ;;
   role-test) require_full_lifecycle; role_test ;;
-  *) echo "usage: $0 {role|status|effective|baseline|branch|freeze|refreeze|verify-freeze|verify-scope|verify-knowledge-scope|freshness|handoff|verify-handoff|delivery-check|worker-evidence|verify-worker-evidence|gate|amend|patch-fingerprint|window-open|window-close|verify-gates|verify-seal|knowledge-done|publish-completion-report|verify-completion-report|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
+  *) echo "usage: $0 {role|status|effective|baseline|branch|freeze|refreeze|verify-freeze|verify-scope|verify-knowledge-scope|freshness|handoff|verify-handoff|delivery-check|worker-evidence|verify-worker-evidence|gate|amend|patch-fingerprint|window-open|window-close|verify-gates|verify-seal|task-source-relocate|knowledge-done|publish-completion-report|verify-completion-report|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
 esac
