@@ -2,16 +2,18 @@
 
 A small, Git-backed reference for deterministic coding-agent control shared by Codex and Claude Code. It aims for engineering determinism: the same repository state, task, frozen evidence, frozen plan, policy, and checks should lead to the same observable acceptance result.
 
+A deterministic **orchestrator** classifies each task, selects a pipeline, and drives **bounded specialist roles** (Explorer, Architect, QA, Implementer, Reviewer, Verifier) through explicit artifacts and independent quality gates. It is not a swarm: no recursive delegation, one implementation worker, bounded remediation, and temporary run state that is deleted at completion. The canonical workflow is [.agents/WORKFLOW.md](.agents/WORKFLOW.md).
+
 ```mermaid
 flowchart LR
-  T[Task contract] --> C[.agents control plane]
-  V[vibecosystem capabilities] --> R[Bounded run]
-  W[LLM Wiki] --> E[Frozen evidence]
-  C --> E --> R
-  R --> O[Code + tests]
-  O --> D[CODE DONE]
-  D --> K[Knowledge transaction]
-  K --> W
+  T[Task] --> K[Classify: TRIVIAL / STANDARD / COMPLEX / CRITICAL]
+  K --> E[Evidence + plan + QA plan, frozen as the pipeline requires]
+  E --> I[Implement: one worker]
+  I --> G[REVIEW / QA / VERIFY gates the class requires]
+  G -->|fail| F[Orchestrator diagnosis, bounded fix]
+  F --> G
+  G -->|all required gates pass| D[CODE DONE, report, DONE]
+  D --> X[Cleanup: run artifacts deleted]
 ```
 
 ## Start a normal application task
@@ -23,13 +25,23 @@ Codex starts at [AGENTS.md](AGENTS.md); Claude Code starts at [CLAUDE.md](CLAUDE
 ./scripts/agent.sh status
 ```
 
-For a new run, create it from templates, set `ACTIVE_RUN`, read its TASK, then capture the task-start baseline before DISCOVER:
+For a new run, create `.agents/runs/<TASK-ID>/` from the templates (`RUN.yaml`, `TASK.md`, `PLAN.md`; `EVIDENCE.md` and `QA_PLAN.md` only where the class requires them), set `ACTIVE_RUN`, read its TASK, **classify** it, then establish the task branch and capture the task-start baseline before DISCOVER:
 
 ```sh
+./scripts/agent.sh classify <TASK-ID> <TRIVIAL|STANDARD|COMPLEX|CRITICAL> [review]
+./scripts/agent.sh pipeline <TASK-ID>     # what this run requires: artifacts, gates, explorer bound
+./scripts/agent.sh branch <TASK-ID>
 ./scripts/agent.sh baseline <TASK-ID>
 ```
 
-Then DISCOVER read-only, build EVIDENCE and PLAN (declaring a `tdd_exemption` per scope path only when RED/GREEN genuinely does not apply), freeze and verify freshness, implement, verify application scope, review, and record handoff fingerprints. CODE DONE is local completion only; use the local delivery gate before any separately authorized provider action. Only then run `/wiki-ingest` and `/wiki-lint` as Transaction B:
+| Class | Evidence | Architect | QA plan + QA gate | REVIEW gate | VERIFY gate |
+|---|---|---|---|---|---|
+| TRIVIAL | no | no | no | no | yes |
+| STANDARD | yes | no | yes | opt-in | yes |
+| COMPLEX | yes | yes | yes | yes | yes |
+| CRITICAL | yes | yes | yes | yes | yes |
+
+The classification criteria and role boundaries are in `.agents/WORKFLOW.md`. Then DISCOVER read-only, build the pipeline's artifacts (declaring a `tdd_exemption` per scope path only when RED/GREEN genuinely does not apply), freeze and verify freshness, implement, and let the independent roles record their gates against the exact final tree. `CODE_DONE` is local completion only; use the local delivery gate before any separately authorized provider action. The knowledge transaction (`/wiki-ingest`, `/wiki-lint`) is optional and runs only when the task changed a durable project contract.
 
 ```sh
 ./scripts/agent.sh freeze <TASK-ID>
@@ -37,13 +49,14 @@ Then DISCOVER read-only, build EVIDENCE and PLAN (declaring a `tdd_exemption` pe
 ./scripts/agent.sh freshness <TASK-ID>
 ./scripts/agent.sh verify-scope <TASK-ID>
 ./scripts/agent.sh verify-worker-evidence <TASK-ID>
+./scripts/agent.sh gate <TASK-ID> <REVIEW|QA|VERIFY> <pass|fail>   # as independent_reviewer / independent_qa / independent_verifier
 ./scripts/agent.sh verify-handoff <TASK-ID>
 ./scripts/agent.sh delivery-check <TASK-ID>
 ```
 
 ### Execution topology: standalone vs. orchestrated
 
-For any run created from the current templates (`RUN.yaml` carries `worker_evidence:`/`tdd:`/`completion_report:`), `agent.sh resolve_topology` decides *how* implementation happens — not Claude, not Codex, not this reference repository unconditionally:
+For a run created from the templates (`RUN.yaml` carries `worker_evidence:`/`tdd:`/`completion_report:`/`lifecycle_gates:`), `agent.sh resolve_topology` decides *how* implementation happens — not Claude, not Codex, not this reference repository unconditionally:
 
 ```sh
 ./scripts/agent.sh effective <TASK-ID>   # includes the resolved execution topology
@@ -56,8 +69,8 @@ For any run created from the current templates (`RUN.yaml` carries `worker_evide
   # ... implement ...
   printf 'command: <test command>\ntarget: <scope path>\n' | ./scripts/agent.sh worker-evidence <TASK-ID> GREEN pass
   ```
-  No `implementation_worker` delegation happens or is required; `agent.sh handoff <TASK-ID> VERIFIED` still requires this RED+GREEN pair (or a validated `tdd_exemption`) — standalone is never a way to skip TDD, only a way to skip *delegation*.
-- **`orchestrated`** — `full_lifecycle` cannot advance past IMPLEMENT by editing application files itself; `agent.sh handoff <TASK-ID> VERIFIED` requires recorded `implementation_worker` RED+GREEN (or a validated `tdd_exemption`) evidence per scope path, authored by that role specifically. Invoke that worker the one canonical way this repository wires (its own Codex adapter — a different consuming project may wire a different tool the same way):
+  No `implementation_worker` delegation happens or is required; `agent.sh handoff <TASK-ID> IMPLEMENTED` still requires this RED+GREEN pair (or a validated `tdd_exemption`) — standalone is never a way to skip TDD, only a way to skip *delegation*.
+- **`orchestrated`** — `full_lifecycle` cannot advance past IMPLEMENT by editing application files itself; `agent.sh handoff <TASK-ID> IMPLEMENTED` requires recorded `implementation_worker` RED+GREEN (or a validated `tdd_exemption`) evidence per scope path, authored by that role specifically. Invoke that worker the one canonical way this repository wires (its own Codex adapter — a different consuming project may wire a different tool the same way):
   ```sh
   ./scripts/worker-run.sh <TASK-ID> RED  --network not-required --prompt-file <prompt.md>
   ./scripts/worker-run.sh <TASK-ID> GREEN --network not-required --prompt-file <prompt.md>
@@ -68,22 +81,26 @@ A run selects its topology by setting `RUN.yaml`'s `execution.topology` to `stan
 
 ### Task completion
 
-`CODE_DONE` is local code completion, not task completion. Before a policy-enforced run can reach `DONE`:
+`CODE_DONE` is local code completion, not task completion. Before a policy-enforced run can reach `DONE`, and then be cleaned up:
 
 ```sh
-./scripts/agent.sh knowledge-done <TASK-ID> [not_applicable]
+./scripts/agent.sh knowledge-done <TASK-ID> [not_applicable]   # not_applicable unless a durable contract changed
 # .agents/runs/<TASK-ID>/COMPLETION_REPORT.md written (see required sections
 # in .agents/WORKFLOW.md), derived from actual run evidence, never fabricated
 ./scripts/agent.sh publish-completion-report <TASK-ID> [ADAPTER]
 ./scripts/agent.sh verify-completion-report <TASK-ID>
 ./scripts/agent.sh handoff <TASK-ID> DONE
+./scripts/agent.sh delivery-check <TASK-ID>
+./scripts/agent.sh cleanup <TASK-ID>      # deletes .agents/runs/<TASK-ID>/ and clears ACTIVE_RUN; then stop
 ```
+
+A run that cannot finish ends with `./scripts/agent.sh terminate <TASK-ID> FAILED|BLOCKED` (reason and evidence on stdin), never a loop.
 
 The default `markdown` adapter (`.agents/task-integrations/markdown.sh`) publishes into the task's own `task_source.path` file; a different task system implements the same two-operation `publish`/`verify` contract (`.agents/task-integrations/README.md`) without any change to `agent.sh` itself.
 
-The checked-in template intentionally leaves `.agents/ACTIVE_RUN` empty. `status` then reports `active_task=none` and implementation is blocked. The YAML policy in `.agents/modes/` is machine-readable; the shared Markdown files explain the rules. Templates for the next run live in `.agents/templates/`.
+The checked-in template intentionally leaves `.agents/ACTIVE_RUN` empty. `status` then reports `active_task=none` and implementation is blocked. The YAML policy in `.agents/modes/` (what a session may do) and the `pipelines:` table in `.agents/config.yaml` (what each class requires) are machine-readable; the shared Markdown files explain the rules. Templates for the next run live in `.agents/templates/`. `.agents/runs/` is temporary working state and is gitignored.
 
-Deterministic does not mean loading everything: TASK and current repository/tests are the default context. Load detailed control guidance and wiki pages only when the current evidence is insufficient; wiki traversal starts at the index and never bulk-loads the graph or unrelated run history.
+Deterministic does not mean loading everything: TASK and current repository/tests are the default context. Load detailed control guidance and wiki pages only when the current evidence is insufficient; wiki traversal starts at the index and never bulk-loads the graph.
 
 ## Capability and knowledge boundaries
 
@@ -91,7 +108,7 @@ vibecosystem is a capability provider, not the workflow owner. This reference ad
 
 The LLM Wiki is plain Markdown with Obsidian-style wikilinks. Obsidian is optional. In Transaction A, use `/wiki-query`-style retrieval read-only and freeze selected references into EVIDENCE: no filed-back synthesis, log, index, entity, concept, decision, or lesson writes. If knowledge is missing, amend and re-freeze.
 
-In Transaction B, after CODE DONE, use the user’s existing `/wiki-ingest` and `/wiki-lint` workflow to update sourced project knowledge, log actual wiki operations, and resolve lint findings. The local `wiki-lint.sh` is only a small CI-friendly structural example; it does not replace `/wiki-lint`.
+Transaction B is optional: only when a task changes a durable project contract or documented architecture, after CODE DONE, use the user’s existing `/wiki-ingest` and `/wiki-lint` workflow to update sourced project knowledge, log actual wiki operations, and resolve lint findings. Run artifacts are never promoted into the wiki wholesale. The local `wiki-lint.sh` is only a small CI-friendly structural example; it does not replace `/wiki-lint`.
 
 See [.agents/ENFORCEMENT.md](.agents/ENFORCEMENT.md) for script-enforced, workflow-enforced, platform-enforced, and policy-only boundaries.
 
@@ -99,26 +116,23 @@ See [.agents/ENFORCEMENT.md](.agents/ENFORCEMENT.md) for script-enforced, workfl
 
 ```sh
 ./scripts/verify.sh
-./scripts/agent.sh test
+./scripts/agent.sh test     # fixture, lifecycle, branch, policy, standalone, knowledge and wiki suites (several minutes)
 ./scripts/agent.sh effective
 ./scripts/agent.sh status
-./scripts/agent.sh validate EXAMPLE-001
-./scripts/agent.sh verify-freeze EXAMPLE-001
 ./scripts/wiki-lint.sh
 ```
 
-EXAMPLE-001 is a small task-registry lookup feature with frozen evidence, plan scope, review, verifier, and result artifacts. It predates task-start baselines, so its scope check is intentionally unavailable as historical reference evidence.
+The example application (`src/`, `tests/`) is a small task registry that provides realistic repository context; the workflow itself is exercised by `./scripts/agent.sh test`, which builds throwaway repositories, so this repository carries no demonstration run.
 
 ## Adopt in another repository
 
 1. Copy and adapt `AGENTS.md`, `CLAUDE.md`, `.agents/`, and `scripts/agent.sh`.
 2. Adapt `scripts/verify.sh`, engineering guidance, and verification rules to the real stack.
 3. Keep `ACTIVE_RUN` empty initially; create and explicitly activate the first real task run.
-4. Remove `EXAMPLE-001` when it is no longer useful as local documentation, or retain it only as a reference.
-5. Initialize/adapt `docs/wiki/` with the existing LLM Wiki skill, then use `/wiki-ingest` only after CODE DONE.
+4. Initialize/adapt `docs/wiki/` with the existing LLM Wiki skill, then use `/wiki-ingest` only after CODE DONE.
 
 vibecosystem remains external capability infrastructure: adapt its installed capabilities; do not copy or reimplement it.
 
 ## Maintaining this template
 
-Normal application tasks use the workflow. Explicit user-requested maintenance of this control-plane/example repository may update the template directly without creating another demonstration run. Git history records those template changes; `.agents/runs/` stays focused on meaningful examples.
+Normal application tasks use the workflow. Explicit user-requested maintenance of this control-plane/example repository may update the template directly without creating another demonstration run. Git history records those template changes.

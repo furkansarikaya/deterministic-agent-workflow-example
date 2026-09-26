@@ -1,7 +1,7 @@
 ---
 title: engineering-determinism
 status: current
-source: docs/architecture.md
+source: docs/agent-control-plane.md
 ---
 
 # Engineering determinism

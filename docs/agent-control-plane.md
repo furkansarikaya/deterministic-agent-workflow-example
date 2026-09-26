@@ -1,4 +1,4 @@
-# Architecture
+# Agent control plane architecture
 
 ## Layers
 
@@ -17,20 +17,23 @@ Engineering determinism means the same repository SHA, contract, frozen evidence
 - task != execution plan: task says requested outcome; frozen plan says authorized implementation boundary.
 - wiki != canonical source: current code/tests and canonical docs outrank stale wiki interpretation.
 - memory != evidence: recalled context cannot silently join frozen evidence.
-- review != verification: reviewer evaluates code/scope; verifier reruns required gates.
+- review != QA != verification: the Reviewer judges the code, QA judges behavior against the frozen QA plan, the Verifier mechanically proves the frozen plan was implemented — three independent gates, required per task classification.
+- run state is disposable: `.agents/runs/<ID>/` is temporary working state, deleted at completion; permanent knowledge is source code, workflow contracts and (rarely) the wiki.
 - CODE DONE != KNOWLEDGE DONE: source knowledge is written only in Transaction B.
 
 ```mermaid
 flowchart LR
-  Discover --> EvidenceFreeze --> PlanFreeze --> Implement --> Verify --> Review --> CodeDone
-  Verify -->|fail| BoundedFix --> Verify
-  Implement -->|missing fact| DiscoverAmendment --> EvidenceFreeze
+  Classify --> Discover --> EvidenceFreeze --> Plan --> QAPlan --> Freeze --> Implement --> Gates --> CodeDone --> Done --> Cleanup
+  Gates -->|fail| Diagnosis --> BoundedFix --> Gates
+  Implement -->|missing fact| Amendment --> Freeze
 ```
+
+Which of Discover/Evidence/QA plan/Review/QA/Verify apply is decided by the classification (TRIVIAL, STANDARD, COMPLEX, CRITICAL); see `.agents/WORKFLOW.md`.
 
 ## Transactions
 
-Transaction A: `TASK → DISCOVER → WIKI READ → EVIDENCE FREEZE → PLAN FREEZE → IMPLEMENT → VERIFY → REVIEW → CODE DONE`. Wiki writes are forbidden.
+Transaction A: `TASK → CLASSIFY → DISCOVER → WIKI READ → EVIDENCE FREEZE → PLAN/QA PLAN FREEZE → IMPLEMENT → GATES → CODE DONE`. Wiki writes are forbidden.
 
-Transaction B: `CODE RESULT → FACTUAL SESSION SUMMARY → WIKI INGEST → DECISIONS/LESSONS → LOG → WIKI LINT → KNOWLEDGE DONE`.
+Transaction B (optional — only when a durable project contract changed): `CODE RESULT → FACTUAL SUMMARY → WIKI INGEST → DECISIONS/LESSONS → LOG → WIKI LINT → KNOWLEDGE DONE`. Otherwise `knowledge-done not_applicable`.
 
 A task cannot rewrite its own past. After completion, it may become history for future tasks.

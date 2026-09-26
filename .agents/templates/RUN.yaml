@@ -1,4 +1,6 @@
-# `agent.sh baseline <TASK-ID>` replaces this pending block with captured
+# Runtime state for one task (`.agents/runs/<TASK-ID>/`, disposable — see
+# .agents/WORKFLOW.md "Runtime artifacts"). Only lifecycle facts belong here.
+# `agent.sh baseline <TASK-ID>` replaces the pending baseline block with captured
 # base-SHA and file fingerprints; it never stores file contents.
 task:
   id: <TASK-ID>
@@ -11,14 +13,11 @@ repository:
 task_source:
   type: local_markdown
   path: <REPOSITORY-RELATIVE-TASK-SOURCE.md>
+  # A hash of the frozen task *contract* (the task source minus its `**Status:**`
+  # value and its published completion-report block), written only by
+  # freeze/refreeze; the file's location changes only via
+  # `agent.sh task-source-relocate`. See .agents/WORKFLOW.md "Task-source contract".
   revision: PENDING
-  # Presence of this key makes `revision` a hash of the frozen task *contract*
-  # (the task source minus its `**Status:**` value and its published
-  # completion-report block), written only by freeze/refreeze; the file's
-  # location changes only via `agent.sh task-source-relocate`. See
-  # .agents/WORKFLOW.md's "Task-source contract". A run frozen before this policy
-  # (EXAMPLE-001) has no such key and keeps its whole-file semantics.
-  revision_scheme: contract
 
 execution:
   mode: deterministic
@@ -26,29 +25,38 @@ execution:
   state: PLANNING
   knowledge_state: not_started
   # standalone | orchestrated, or PENDING to inherit .agents/config.yaml's
-  # default_topology. See .agents/WORKFLOW.md's "Execution topology".
+  # default_topology. See .agents/WORKFLOW.md "Execution topology".
   topology: PENDING
+
+# Written by `agent.sh classify <TASK-ID> <TRIVIAL|STANDARD|COMPLEX|CRITICAL>`; it
+# selects which artifacts are frozen and which gates are required (.agents/config.yaml
+# `pipelines:`). Run `agent.sh pipeline <TASK-ID>` to see what it requires.
+pipeline:
+  classification: PENDING
+  review: PENDING
 
 baseline:
   status: pending
 
+# `not_required` replaces a hash for an artifact the pipeline does not produce.
 freeze:
   task_sha256: PENDING
   evidence_sha256: PENDING
   plan_sha256: PENDING
+  qa_plan_sha256: PENDING
   policy_sha256: PENDING
+  pipeline: PENDING
 
 handoff:
   state: PLANNED
-  verification_patch_sha256: PENDING
-  review_patch_sha256: PENDING
+  implemented_patch_sha256: PENDING
   code_done_patch_sha256: PENDING
 
-# Presence of these three keys (not their values) is what makes a run subject
-# to worker-evidence/TDD/completion-report enforcement — see agent.sh's
-# `policy_enforced`/`historical_reference` pattern. A run frozen before this
-# policy existed has none of these keys and is never retroactively edited to
-# add them.
+# Presence of these keys (not their values) subjects a run to worker-evidence /
+# TDD / completion-report enforcement, and — for `lifecycle_gates` — to the
+# classification-driven REVIEW/QA/VERIFY gates, tree-attested implementation
+# ownership, the hash-chained lifecycle ledger (LEDGER.log) and the scripted
+# `agent.sh amend` reopen. See .agents/WORKFLOW.md "Lifecycle gates".
 worker_evidence:
   required: true
 
@@ -61,11 +69,5 @@ completion_report:
   published: false
   receipt: PENDING
 
-# Presence of this key makes a run subject to the REVIEW/QA gate loop,
-# tree-attested implementation ownership, the hash-chained lifecycle ledger
-# (LEDGER.log) and the scripted `agent.sh amend` reopen — see agent.sh's
-# `gates_enforced` and .agents/WORKFLOW.md's "Lifecycle gates". A run frozen
-# before this policy existed (EXAMPLE-001) has no such key and is never
-# retroactively edited to add one.
 lifecycle_gates:
   required: true

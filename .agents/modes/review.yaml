@@ -5,8 +5,3 @@ application_writes: false
 wiki:
   read: true
   write_during_code_transaction: false
-review:
-  required: true
-verification:
-  required: true
-

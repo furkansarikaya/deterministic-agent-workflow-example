@@ -62,14 +62,6 @@ for page in $pages; do
   fi
 done
 
-task_refs=$(grep -rhoE 'EXAMPLE-[0-9]{3}' "$wiki_root" --include='*.md' --exclude="$report_name" | sort -u || true)
-for task_ref in $task_refs; do
-  if [ ! -d "$root/.agents/runs/$task_ref" ]; then
-    echo "- ERROR nonexistent task reference: \`$task_ref\`" >> "$tmp_file"
-    errors=$((errors + 1))
-  fi
-done
-
 duplicate_titles=$(find "$wiki_root" -type f -name '*.md' ! -name "$report_name" -exec sed -n 's/^title: //p' {} \; | sort | uniq -d)
 if [ -n "$duplicate_titles" ]; then
   printf '%s\n' "$duplicate_titles" | sed 's/^/- ERROR duplicate title: `/' | sed 's/$/`/' >> "$tmp_file"

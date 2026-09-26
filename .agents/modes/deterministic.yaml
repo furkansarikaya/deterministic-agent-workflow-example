@@ -3,11 +3,12 @@ task:
   required: true
 baseline:
   required_before_implementation: true
+# Which artifacts a task freezes and which gates it must pass is decided by its
+# classification (`pipelines:` in .agents/config.yaml), not by this mode; this
+# mode only says what the session is permitted to do.
 evidence:
-  required: true
   frozen_before_implementation: true
 plan:
-  required: true
   frozen_before_implementation: true
 scope:
   frozen: true
@@ -39,12 +40,13 @@ self_learning:
   write: deferred
 orchestration:
   swarm: false
+  recursive_delegation: false
   max_implementation_workers: 1
 review:
-  required: true
+  independent: true
+qa:
   independent: true
 verification:
-  required: true
   independent_verifier: true
   max_bounded_fix_attempts: 2
 dependencies:

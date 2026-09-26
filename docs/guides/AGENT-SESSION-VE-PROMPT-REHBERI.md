@@ -33,7 +33,7 @@ Kalıcı state chat geçmişinde değil şuralardadır:
 - `EVIDENCE.md`
 - `PLAN.md`
 - `RUN.yaml`
-- gerektiğinde `RESULT.md`
+- gerektiğinde `QA_PLAN.md` ve `COMPLETION_REPORT.md`
 - canonical proje dokümantasyonu
 - gerektiğinde LLM Wiki
 
@@ -351,7 +351,7 @@ Worker şunları yapmaz:
 - PLAN oluşturmaz/değiştirmez
 - freeze/refreeze yapmaz
 - VERIFY/REVIEW yapmaz
-- VERIFIED/REVIEWED/CODE_DONE işaretlemez
+- IMPLEMENTED/CODE_DONE işaretlemez, gate kaydetmez
 - delivery yapmaz
 - wiki/knowledge transaction yapmaz
 - başka agent çağırmaz
@@ -402,7 +402,7 @@ You remain responsible for:
 
 Do not let the implementation worker become the workflow orchestrator.
 Do not let the worker delegate to another agent.
-Do not let the worker mark VERIFIED, REVIEWED, or CODE_DONE.
+Do not let the worker mark IMPLEMENTED or CODE_DONE.
 
 Use repository state as the persistent source of truth. Do not depend on Codex having access to this Claude conversation.
 
@@ -460,7 +460,7 @@ Verification veya review sonucunda bounded bir implementation fix gerekiyorsa fo
 
 Implementation worker'ın workflow orchestrator'a dönüşmesine izin verme.
 Worker'ın başka bir agent delege etmesine izin verme.
-Worker'ın VERIFIED, REVIEWED veya CODE_DONE işaretlemesine izin verme.
+Worker'ın IMPLEMENTED veya CODE_DONE işaretlemesine izin verme.
 
 Persistent source of truth olarak repository state'i kullan. Codex'in bu Claude conversation'ına erişebildiğini varsayma.
 
@@ -570,8 +570,8 @@ You MUST NOT:
 - amend or refreeze,
 - expand scope,
 - perform REVIEW,
-- mark VERIFIED,
-- mark REVIEWED,
+- mark IMPLEMENTED,
+- record REVIEW/QA/VERIFY gates,
 - mark CODE_DONE,
 - perform delivery,
 - commit or push,
@@ -610,7 +610,7 @@ Yalnız PLAN tarafından yetkili application scope'u uygula.
 
 Yapabileceklerin: active run ve frozen contract'ı okumak, task-relevant repository/Git state'i incelemek, yetkili application path'lerini değiştirmek, focused implementation check'leri çalıştırmak ve frozen scope içindeki implementation kaynaklı hataları düzeltmektir.
 
-DISCOVER, EVIDENCE, PLAN, amendment/refreeze, scope genişletme, REVIEW, VERIFIED/REVIEWED/CODE DONE, delivery, commit/push, external task update, wiki/knowledge, başka worker çağırma veya delegation yapma.
+DISCOVER, EVIDENCE, PLAN, amendment/refreeze, scope genişletme, REVIEW, IMPLEMENTED/CODE DONE, delivery, commit/push, external task update, wiki/knowledge, başka worker çağırma veya delegation yapma.
 
 Material planning kararı, PLAN dışı path, conflicting authoritative evidence veya yetkisiz destructive/irreversible işlem gerekirse DUR ve blocker'ı orchestrator'a döndür. Contract'ı kendin değiştirme.
 
@@ -637,7 +637,7 @@ Fix ONLY this issue within the existing frozen TASK, EVIDENCE, PLAN, and authori
 Do not redo discovery, evidence, planning, or freezing.
 Do not expand scope.
 Do not perform review.
-Do not mark VERIFIED, REVIEWED, or CODE_DONE.
+Do not mark IMPLEMENTED or CODE_DONE.
 Do not perform delivery or knowledge operations.
 Do not delegate to another agent.
 
@@ -665,7 +665,7 @@ Orchestrator'un verification/review sırasında bulduğu issue:
 
 Yalnız bu issue'yu mevcut frozen TASK, EVIDENCE, PLAN ve yetkili application scope içinde düzelt.
 
-Discovery, evidence, planning veya freeze'i tekrar yapma. Scope genişletme, review, VERIFIED/REVIEWED/CODE DONE, delivery, knowledge veya delegation yapma.
+Discovery, evidence, planning veya freeze'i tekrar yapma. Scope genişletme, review, IMPLEMENTED/CODE DONE, delivery, knowledge veya delegation yapma.
 
 Fix material plan/scope değişikliği gerektirirse frozen contract'ı değiştirmek yerine dur ve blocker'ı döndür.
 
@@ -840,17 +840,19 @@ yaptıktan sonra aynı Claude session'ında Codex worker dispatch eder ve dönü
 
 ---
 
-# 13. Reviewer ve verifier ayrı session mı?
+# 13. Reviewer, QA ve verifier ayrı session mı?
 
 Kullanıcının manuel olarak ayrı Claude terminal/session açması gerekmez.
 
-Reviewer ve verifier gerektiğinde bounded subagent/context olarak çalışabilir.
+Reviewer, QA ve verifier gerektiğinde bounded subagent/context olarak çalışır; hangilerinin gerektiğini görevin sınıfı belirler (TRIVIAL yalnız verifier, STANDARD QA + verifier, COMPLEX/CRITICAL üçü birden — ayrıntı `.agents/WORKFLOW.md`).
 
 ```text
-                    ┌─ code reviewer
-Main task session ──┤
-                    └─ verifier
+                    ┌─ code reviewer  (independent_reviewer → REVIEW gate)
+Main task session ──┼─ QA             (independent_qa       → QA gate)
+                    └─ verifier       (independent_verifier → VERIFY gate)
 ```
+
+Her rol kendi raporunu (`REVIEW.md`, `QA_REPORT.md`, `VERIFY.md`) yazar ve gate'ini kaydeder; birbirinin işini yapmaz, kodu düzeltmez. Kod sorunu bulunursa Orchestrator'a döner; Orchestrator bounded fix'i (en fazla 2) başlatır ve gate'ler yeni ağaç için yeniden koşar.
 
 Reviewer context'i mümkün olduğunca bounded olmalıdır:
 
@@ -860,11 +862,11 @@ Reviewer context'i mümkün olduğunca bounded olmalıdır:
 - task diff'i
 - ilgili test sonuçları
 
-Verifier'ın context'i mümkünse daha da küçük tutulmalıdır.
+QA context'i frozen QA_PLAN ve çalışan davranıştır; verifier'ın context'i mümkünse daha da küçük tutulmalıdır.
 
-Reviewer/verifier gerçek repository verification komutlarının yerine geçmez.
+Reviewer/QA/verifier gerçek repository verification komutlarının yerine geçmez.
 
-Claude orchestrator + Codex worker modelinde review/verifier ownership Claude tarafında kalır.
+Claude orchestrator + Codex worker modelinde review/QA/verify ownership Claude tarafında (bağımsız rollerde) kalır; worker gate kaydedemez.
 
 ---
 

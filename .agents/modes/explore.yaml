@@ -9,8 +9,3 @@ memory:
   write: false
 orchestration:
   swarm: explicit_only
-review:
-  required: false
-verification:
-  required: false
-

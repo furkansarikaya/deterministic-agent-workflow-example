@@ -87,7 +87,7 @@ Users can create and list todos.
 - build passes
 - tests pass
 - deterministic scope passes
-- review/verifier complete
+- required gates (REVIEW/QA/VERIFY per classification) passed
 ```
 
 ## Task

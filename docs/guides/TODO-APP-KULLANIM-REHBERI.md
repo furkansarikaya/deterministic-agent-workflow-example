@@ -86,9 +86,7 @@ CLAUDE.md
 scripts/verify.sh
 ```
 
-`EXAMPLE-001` gerçek projede zorunlu değildir.
-
-İstersen referans olarak tut; istemiyorsan sil.
+Bu repository'de tamamlanmış bir run örneği yoktur: `.agents/runs/` geçici çalışma alanıdır (gitignore'dadır) ve görev bitince `agent.sh cleanup` ile silinir.
 
 Ama:
 
@@ -411,11 +409,13 @@ Yeni run:
 ```text
 .agents/runs/TODO-1/
 ├── TASK.md
-├── EVIDENCE.md
+├── EVIDENCE.md      (TRIVIAL dışında)
 ├── PLAN.md
-├── RUN.yaml
-└── review/
+├── QA_PLAN.md       (STANDARD ve üstü)
+└── RUN.yaml
 ```
+
+Bu görev tipine göre gerekli dosyalar `agent.sh classify` ile seçilir (TRIVIAL / STANDARD / COMPLEX / CRITICAL; ayrıntı `.agents/WORKFLOW.md`). REVIEW.md, QA_REPORT.md ve VERIFY.md bağımsız rollerin gate'leriyle birlikte, COMPLETION_REPORT.md ise sonuç olarak oluşur.
 
 `.agents/ACTIVE_RUN`:
 
@@ -668,7 +668,7 @@ Verification:
 No new dependencies added.
 ```
 
-Bu comment audit için faydalıdır ama `.agents/runs/TODO-1/RESULT.md` yerine geçmez.
+Bu comment audit için faydalıdır ama `.agents/runs/TODO-1/COMPLETION_REPORT.md` yerine geçmez.
 
 ---
 

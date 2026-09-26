@@ -1,4 +1,5 @@
 .DS_Store
 coverage.out
 bin/
-
+# Runtime task state is disposable working state, never committed (see .agents/WORKFLOW.md "Runtime artifacts").
+.agents/runs/

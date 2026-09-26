@@ -1,7 +1,7 @@
 ---
 title: use-in-memory-storage-for-example
 status: accepted
-source: docs/architecture.md
+source: docs/agent-control-plane.md
 ---
 
 # Use in-memory storage for example

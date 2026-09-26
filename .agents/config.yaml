@@ -34,3 +34,39 @@ safety:
   destructive_git_requires_explicit_authorization: true
   external_network_requires_task_authorization: true
   dependency_changes_require_task_authorization: true
+# Task classification selects the lifecycle (see .agents/WORKFLOW.md "Pipeline
+# selection"). Every key here is consumed by scripts/agent.sh:
+#   evidence         EVIDENCE.md is produced and frozen
+#   qa               QA_PLAN.md is produced and frozen, and the QA gate is required
+#   review           yes | no | optional (STANDARD: opted in per run by `classify <ID> STANDARD review`)
+#   architect        PLAN.md must carry an `## Architecture` section
+#   max_explorers    bound on parallel Explorer assignments (policy-only; see .agents/ENFORCEMENT.md)
+#   max_scope_paths  hard bound on PLAN.md scope paths (a bigger change is not this class)
+# The VERIFY gate is required for every class. Bounded remediation is
+# `verification.max_bounded_fix_attempts` in the mode policy, for every class.
+pipelines:
+  TRIVIAL:
+    evidence: no
+    qa: no
+    review: no
+    architect: no
+    max_explorers: 0
+    max_scope_paths: 2
+  STANDARD:
+    evidence: yes
+    qa: yes
+    review: optional
+    architect: no
+    max_explorers: 1
+  COMPLEX:
+    evidence: yes
+    qa: yes
+    review: yes
+    architect: yes
+    max_explorers: 2
+  CRITICAL:
+    evidence: yes
+    qa: yes
+    review: yes
+    architect: yes
+    max_explorers: 3

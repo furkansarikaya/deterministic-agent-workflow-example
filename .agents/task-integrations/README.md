@@ -26,10 +26,10 @@ appends the report under an idempotent, delimited `## Completion Report`
 section and returns a `<path>#<sha256-of-report-body>` receipt. Re-publishing
 replaces the prior section rather than duplicating it.
 
-## Writing into the task source (contract-scheme runs)
+## Writing into the task source
 
-For a run whose `task_source.revision_scheme` is `contract` (see
-`.agents/WORKFLOW.md`, "Task-source contract"), `agent.sh` checks that the frozen
+For a local Markdown task source (see `.agents/WORKFLOW.md`,
+"Task-source contract"), `agent.sh` checks that the frozen
 task contract is fresh before it calls `publish` and again immediately after.
 The **only** part of a local Markdown task source an adapter may change is the one
 block `markdown.sh` writes: the `## Completion Report` heading, a blank line, the

@@ -1,7 +1,7 @@
 ---
 title: two-transaction-model
 status: current
-source: docs/architecture.md
+source: docs/agent-control-plane.md
 ---
 
 # Two-transaction model
