@@ -31,7 +31,7 @@ AGENTS.md  CLAUDE.md  .agents/  scripts/agent.sh  scripts/worker-run.sh  scripts
 Tek cümleyle başlat (örnekler: prompt kataloğu):
 
 ```text
-Work on docs/project/tasks/TODO-001.md.
+Complete docs/project/tasks/TODO-001.md through task completion, then stop before delivery.
 ```
 
 Agent boot protocol'ü izler: run oluşturur, sınıflandırır, branch açar, baseline alır, gerekli artifact'ları dondurur, tek worker ile implemente eder, bağımsız REVIEW/QA/VERIFY gate'lerini geçirir, completion report'u yayınlar, `delivery-check` yapar, run'ı temizler ve durur. Commit/push/PR için ayrıca açık yetki verirsin.

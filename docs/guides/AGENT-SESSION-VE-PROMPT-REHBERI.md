@@ -15,7 +15,7 @@ Repository'nin sahip olduğu durum (chat geçmişinde **değil**):
 | Ne | Nerede | Kalıcı mı |
 |---|---|---|
 | Kurallar, roller, pipeline tablosu | `AGENTS.md`, `CLAUDE.md`, `.agents/` (`WORKFLOW.md`, `ENFORCEMENT.md`, `config.yaml`, `modes/`, `templates/`) | Evet |
-| Task tanımı | task kaynağı (ör. `docs/project/tasks/TODO-001.md`) | Evet |
+| Task tanımı | task kaynağı (ör. `docs/project/tasks/TASK-123.md`) | Evet |
 | Proje bilgisi | `docs/wiki/` (yalnız kalıcı sözleşme/karar değiştiyse güncellenir) | Evet |
 | Kod ve testler | Git | Evet |
 | Çalışan task'ın durumu | `.agents/runs/<TASK-ID>/` | **Hayır — geçici** |
@@ -36,7 +36,7 @@ Normal kullanımda prompt tek cümledir: **ne istediğini** söyle, task kaynağ
 
 Prompt'a **yazma**: "DISCOVER yap, EVIDENCE yaz, freeze et…" gibi lifecycle adımları, "Codex'e delege et" gibi topology talimatları, "approval isteme" gibi durma kuralları, "bitince başka task'a geçme" gibi stop koşulları. Bunlar repository'de tanımlıdır; prompt'ta tekrarlamak kuralı değiştirmez, sadece çelişki riski yaratır.
 
-Prompt'a **yaz**: niyet (ne, nerede, hangi davranış), varsa task kimliği veya dosyası, varsa senin bildiğin ve repository'den çıkarılamayacak kısıt.
+Prompt'a **yaz**: niyet (ne, nerede, hangi davranış), varsa task kimliği veya dosyası, kontrolün sana döneceği sınır (ör. "…then stop before delivery"), varsa senin bildiğin ve repository'den çıkarılamayacak kısıt. Kural: **Prompt = intent + user-control boundary. The repository owns execution.**
 
 ### Agent ne zaman sorar / durur?
 
@@ -109,71 +109,219 @@ Bir gate başarısız olursa kontrol Orchestrator'a döner; teşhis eder (implem
 
 ## 6. Prompt kataloğu
 
-Hepsi tek cümledir; İngilizce ve Türkçe karşılıkları aynı işi yapar. Köşeli parantez içini kendi task'ınla değiştir.
+> **Prompt = intent + user-control boundary. The repository owns execution.**
+> Sen NE istediğini ve kontrolün NEREDE sana döneceğini söylersin; lifecycle'ı (branch, keşif, dondurma, delegation, QA/review/verification, knowledge, cleanup) repository yürütür ve prompt'a yazılmaz.
 
-### Yeni değişiklik
+Hepsi kısa ve niyet odaklıdır; İngilizce ve Türkçe karşılıkları aynı işi yapar. Örnekteki task kimliklerini ve konuları kendinle değiştir.
+
+Kullanabileceğin sınırlar (yalnız workflow'un gerçekten tanımladığı yerler):
+
+| Sınır | Anlamı |
+|---|---|
+| `through task completion, then stop before delivery` | Task, workflow'un tamamlanma noktasına kadar yürür (gate'ler geçer, completion report yayınlanır, `DONE` ve `cleanup`); commit/push/PR yapılmaz. Implementation işlerinin normal sınırı budur. |
+| `stop before merge` | Delivery workflow'u (yerel `delivery-check`, sonra senin yetkinle commit/push/PR) yürür; merge her zaman sende kalır (workflow hiçbir zaman merge etmez). Delivery işlerinin normal sınırı budur. |
+| `Do not start implementation` | Yalnız planlama/reconcile; kod değişmez. |
+| `do not change anything` | Yalnız okuma/analiz; run gerekmez. |
+
+Sınır belirtmezsen implementation işleri yine `CODE_DONE`/`DONE` sonrası durur ve teslim için senin açık yetkini bekler; sınırı yazmak niyeti netleştirir.
+
+### Small change / minor adjustment
 
 ```text
-Add a DELETE /api/v1/todos/{id} endpoint that returns 204 and 404 for an unknown id.
+Fix the typo in the README quick-start heading through task completion, then stop before delivery.
 ```
 ```text
-DELETE /api/v1/todos/{id} endpoint'i ekle; başarıda 204, bilinmeyen id için 404 dönsün.
-```
-
-### Task dosyasından çalış (Markdown)
-
-```text
-Work on docs/project/tasks/TODO-001.md.
-```
-```text
-docs/project/tasks/TODO-001.md task'ı üzerinde çalış.
-```
-
-### Linear issue'sundan çalış
-
-```text
-Work on Linear issue TODO-123.
-```
-```text
-Linear'daki TODO-123 issue'su üzerinde çalış.
-```
-
-Linear için repository'nin bir task-integration adapter'ı olmalıdır (`.agents/task-integrations/`, ortak arayüz `README.md`'de); repository'de yalnız `markdown` adapter'ı gelir. Adapter yoksa agent completion report'u yayınlayamaz ve durur.
-
-### Küçük düzeltme
-
-```text
-Fix the typo in the README quick-start heading.
-```
-```text
-README hızlı başlangıç başlığındaki yazım hatasını düzelt.
+README hızlı başlangıç başlığındaki yazım hatasını task completion'a kadar düzelt ve delivery'den önce dur.
 ```
 
 ### Bug fix
 
 ```text
-Fix: completing an already completed todo returns 500 instead of 409.
+Fix the pagination bug through task completion, then stop before delivery.
 ```
 ```text
-Düzelt: tamamlanmış bir todo'yu tekrar tamamlamak 409 yerine 500 dönüyor.
-```
-
-### Devam et (session yarıda kaldıysa)
-
-```text
-Continue TODO-001.
-```
-```text
-TODO-001'e devam et.
+Pagination bug'ını task completion'a kadar düzelt ve delivery'den önce dur.
 ```
 
-### Durum sor (değişiklik yapmaz)
+Bug bir task kaynağında tanımlıysa:
 
 ```text
-What is the state of TODO-001?
+Fix BUG-42 through task completion, then stop before delivery.
 ```
 ```text
-TODO-001 hangi aşamada?
+BUG-42'yi task completion'a kadar düzelt ve delivery'den önce dur.
+```
+
+### New feature or behavior change
+
+```text
+Implement the requested cache invalidation change through task completion, then stop before delivery.
+```
+```text
+İstenen cache invalidation değişikliğini task completion'a kadar tamamla ve delivery'den önce dur.
+```
+
+```text
+Add a DELETE /api/v1/todos/{id} endpoint (204 on success, 404 for an unknown id) through task completion, then stop before delivery.
+```
+```text
+DELETE /api/v1/todos/{id} endpoint'ini (başarıda 204, bilinmeyen id için 404) task completion'a kadar ekle ve delivery'den önce dur.
+```
+
+Bilinen ve repository'den çıkarılamayacak bir kısıt varsa cümleye ekle:
+
+```text
+Add tag filtering to GET /api/v1/todos without adding a new dependency, through task completion, then stop before delivery.
+```
+```text
+GET /api/v1/todos'a tag filtresi ekle, yeni bağımlılık ekleme; task completion'a kadar tamamla ve delivery'den önce dur.
+```
+
+### Normal task execution (task kaynağından)
+
+Task bir Markdown dosyasında tanımlıysa:
+
+```text
+Complete docs/project/tasks/TASK-123.md through task completion, then stop before delivery.
+```
+```text
+docs/project/tasks/TASK-123.md'yi task completion'a kadar tamamla ve delivery'den önce dur.
+```
+
+Sadece kimlikle:
+
+```text
+Complete TASK-123 through task completion, then stop before delivery.
+```
+```text
+TASK-123'ü task completion'a kadar tamamla ve delivery'den önce dur.
+```
+
+Feature task'ı:
+
+```text
+Complete FEATURE-17 through task completion, then stop before delivery.
+```
+```text
+FEATURE-17'yi task completion'a kadar tamamla ve delivery'den önce dur.
+```
+
+### Linear issue'sundan çalışmak
+
+```text
+Complete Linear issue TASK-123 through task completion, then stop before delivery.
+```
+```text
+Linear'daki TASK-123 issue'sunu task completion'a kadar tamamla ve delivery'den önce dur.
+```
+
+Linear için repository'nin bir task-integration adapter'ı olmalıdır (`.agents/task-integrations/`, ortak arayüz `README.md`'de); repository'de yalnız `markdown` adapter'ı gelir. Adapter yoksa agent completion report'u yayınlayamaz ve durur.
+
+### Documentation-only change
+
+```text
+Update the affected documentation and stop before delivery.
+```
+```text
+İlgili dokümantasyonu güncelle ve delivery'den önce dur.
+```
+
+```text
+Update the API guide to describe the new pagination parameters through task completion, then stop before delivery.
+```
+```text
+API guide'ı yeni pagination parametrelerini anlatacak şekilde task completion'a kadar güncelle ve delivery'den önce dur.
+```
+
+### Maintenance / control-plane change
+
+Control plane'in (`.agents/`, şablonlar, script'ler) bakımı, kullanıcı isteğiyle yapılan açık bir istisnadır: dosyalar bir run oluşturulmadan doğrudan güncellenir.
+
+```text
+Maintain the control plane: update the workflow templates for the new naming convention, then stop before delivery.
+```
+```text
+Control plane bakımı: workflow template'lerini yeni naming convention'a göre güncelle ve delivery'den önce dur.
+```
+
+Rutin bağımlılık/temizlik gibi normal bir maintenance task'ı uygulama kodunu etkiliyorsa normal implementation işi gibi verilir:
+
+```text
+Remove the unused legacy helper modules through task completion, then stop before delivery.
+```
+```text
+Kullanılmayan legacy helper modülleri task completion'a kadar kaldır ve delivery'den önce dur.
+```
+
+### Planning
+
+```text
+Plan TASK-123. Do not start implementation.
+```
+```text
+TASK-123'ü planla. Implementation'a başlama.
+```
+
+Plan dondurulunca kontrol sana döner; run diskte kalır ve `Continue TASK-123 …` ile kaldığı yerden devam eder.
+
+### Task-contract reconciliation
+
+Task kaynağı ile mevcut kanonik kararlar/repository durumu arasındaki farkı gidermek için:
+
+```text
+Reconcile TASK-123 with the current canonical decisions. Do not start implementation.
+```
+```text
+TASK-123'ü mevcut canonical kararlarla reconcile et. Implementation'a başlama.
+```
+
+Task sözleşmesi freeze'den sonra değiştiyse `freshness` bloklar; reconcile bunu amendment ve yeniden freeze ile çözer (implementation ayrıca istenir).
+
+### Devam etmek (session yarıda kaldıysa)
+
+```text
+Continue TASK-123 through task completion, then stop before delivery.
+```
+```text
+TASK-123'e task completion'a kadar devam et ve delivery'den önce dur.
+```
+
+### Delivery
+
+```text
+Deliver TASK-123 using the repository-defined delivery workflow, then stop before merge.
+```
+```text
+TASK-123'ü repository-defined delivery workflow'u kullanarak deliver et ve merge'den önce dur.
+```
+
+Delivery yerel `delivery-check` ile başlar; commit, push ve PR açık yetkinle yapılır ve merge her zaman sende kalır. Kısa biçim:
+
+```text
+Commit and push the completed TASK-123 work, then stop before merge.
+```
+```text
+Tamamlanan TASK-123 işini commit'le ve push'la, merge'den önce dur.
+```
+
+### Bitmiş işin devamı (yeni task)
+
+Cleanup'tan sonra iş yeni bir task'tır:
+
+```text
+Follow up on TASK-123: reject titles longer than 200 characters, through task completion, then stop before delivery.
+```
+```text
+TASK-123'ün devamı: 200 karakterden uzun başlıkları reddet; task completion'a kadar tamamla ve delivery'den önce dur.
+```
+
+### Durum sormak (değişiklik yapmaz)
+
+```text
+What is the state of TASK-123? Do not change anything.
+```
+```text
+TASK-123 hangi aşamada? Hiçbir şeyi değiştirme.
 ```
 
 ### Araştırma / soru (run gerektirmez)
@@ -185,42 +333,13 @@ Explain how todo persistence is layered; do not change anything.
 Todo persistence'ın katmanlarını açıkla; hiçbir şeyi değiştirme.
 ```
 
-### Bitmiş işin devamı (yeni task)
+### Bırakmak
 
 ```text
-Follow up on TODO-001: reject titles longer than 200 characters.
+Stop TASK-123; it is blocked on an unavailable database.
 ```
 ```text
-TODO-001'in devamı: 200 karakterden uzun başlıkları reddet.
-```
-
-### Teslim (açık yetki)
-
-```text
-Commit the completed TODO-001 work and push it.
-```
-```text
-Tamamlanan TODO-001 işini commit'le ve push'la.
-```
-
-### Bırak
-
-```text
-Stop TODO-001; it is blocked on an unavailable database.
-```
-```text
-TODO-001'i bırak; erişilemeyen veritabanı yüzünden bloke.
-```
-
-### Sen bildiğin bir kısıt eklemek istersen
-
-Kısıtı cümleye ekle; workflow'u tarif etme:
-
-```text
-Add tag filtering to GET /api/v1/todos without adding a new dependency.
-```
-```text
-GET /api/v1/todos'a tag filtresi ekle; yeni bağımlılık ekleme.
+TASK-123'ü bırak; erişilemeyen veritabanı yüzünden bloke.
 ```
 
 ---

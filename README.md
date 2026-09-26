@@ -21,10 +21,13 @@ flowchart LR
 Codex starts at [AGENTS.md](AGENTS.md); Claude Code starts at [CLAUDE.md](CLAUDE.md). Both follow the same protocol. You state intent in **one sentence**; the repository owns the lifecycle, delegation, verification, cleanup and stop conditions:
 
 ```text
-Work on docs/project/tasks/TODO-001.md.
-Add a DELETE /api/v1/todos/{id} endpoint that returns 204, or 404 for an unknown id.
-Continue TODO-001.
+Complete TASK-123 through task completion, then stop before delivery.
+Fix the pagination bug through task completion, then stop before delivery.
+Reconcile TASK-123 with the current canonical decisions. Do not start implementation.
+Deliver TASK-123 using the repository-defined delivery workflow, then stop before merge.
 ```
+
+Prompt = intent + user-control boundary. The repository owns execution.
 
 The agent resumes or creates the run, classifies the task, freezes what the class requires, implements through a single worker, passes independent gates, publishes the completion report, cleans up the run and stops. Commit, push and PR need your separate, explicit authorization. More prompts (English and Turkish) and the day-to-day flow: [docs/guides/AGENT-SESSION-VE-PROMPT-REHBERI.md](docs/guides/AGENT-SESSION-VE-PROMPT-REHBERI.md).
 

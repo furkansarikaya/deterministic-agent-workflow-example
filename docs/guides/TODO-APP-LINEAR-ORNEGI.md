@@ -32,10 +32,10 @@ Issue'nun kabul kriterleri ve kısıtları agent'ın run'daki `TASK.md` sözleş
 ## Kullanım
 
 ```text
-Work on Linear issue TODO-1.
+Complete Linear issue TODO-1 through task completion, then stop before delivery.
 ```
 ```text
-Linear'daki TODO-1 issue'su üzerinde çalış.
+Linear'daki TODO-1 issue'sunu task completion'a kadar tamamla ve delivery'den önce dur.
 ```
 
 Lifecycle, sınıflandırma, delegation, gate'ler ve cleanup repository tarafından yürütülür; prompt'a yazılmaz.

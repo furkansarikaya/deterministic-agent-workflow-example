@@ -86,10 +86,10 @@ dotnet test --no-build
 Task'ı tek cümleyle ver (ayrıntı ve örnekler: [prompt kataloğu](AGENT-SESSION-VE-PROMPT-REHBERI.md#6-prompt-kataloğu)):
 
 ```text
-Work on docs/project/tasks/TODO-001.md.
+Complete docs/project/tasks/TODO-001.md through task completion, then stop before delivery.
 ```
 ```text
-docs/project/tasks/TODO-001.md task'ı üzerinde çalış.
+docs/project/tasks/TODO-001.md'yi task completion'a kadar tamamla ve delivery'den önce dur.
 ```
 
 Gerisini agent, `AGENTS.md`'deki boot protocol ile yapar: run dizinini şablonlardan oluşturur ve aktive eder, task'ı sınıflandırır, task branch'ini açar, baseline alır, DISCOVER'ı read-only yürütür, sınıfın gerektirdiği evidence/plan/QA planını üretip dondurur, tek worker ile implemente eder, bağımsız gate'leri geçirir, completion report'u yayınlar ve run'ı temizleyip durur.

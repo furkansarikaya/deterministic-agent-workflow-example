@@ -136,10 +136,10 @@ Freeze'den sonra task dosyasının **sözleşme kısmı** değişirse `freshness
 ## Başlatma ve bitirme
 
 ```text
-Work on docs/project/tasks/TODO-001.md.
+Complete docs/project/tasks/TODO-001.md through task completion, then stop before delivery.
 ```
 ```text
-docs/project/tasks/TODO-001.md task'ı üzerinde çalış.
+docs/project/tasks/TODO-001.md'yi task completion'a kadar tamamla ve delivery'den önce dur.
 ```
 
 Agent run'ı oluşturur, sınıflandırır, çalıştırır, completion report'u **bu task dosyasına** yayınlar (`markdown` adapter'ı) ve run'ı temizleyip durur. Task dosyasındaki `Status` ve sprint checkbox'ı uygulama scope'undan ayrı bookkeeping'dir. Aktivasyondaki `Status → In Progress` düzenlemesi baseline'dan **önce** yapılırsa baseline onu kullanıcı işi olarak kaydeder; freeze'den sonra scope dışı bir `docs/project/` düzenlemesi ise scope kontrolünde "unmapped path" olarak görünür (task kaynağı için tek istisna, completion report yayınlandıktan sonraki yazımdır). Bu yüzden bookkeeping'i ya baseline'dan önce/yayından hemen önce yap ya da ilgili yolları PLAN `scope:` içine al. Tamamlanmada `Status → Done` ve sprint checkbox'ı `[x]`.
