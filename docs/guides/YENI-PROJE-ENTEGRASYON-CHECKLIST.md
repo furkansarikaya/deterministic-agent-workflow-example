@@ -1,127 +1,54 @@
 # Deterministic Agent Workflow — Yeni Projeye Entegrasyon Checklist'i
 
+Ayrıntılı anlatım: [Todo App Uygulama Rehberi](TODO-APP-KULLANIM-REHBERI.md). Günlük kullanım ve prompt'lar: [Agent Session ve Prompt Rehberi](AGENT-SESSION-VE-PROMPT-REHBERI.md).
+
 ## Kopyala
 
-Golden reference'tan:
-
 ```text
-AGENTS.md
-CLAUDE.md
-.agents/
-scripts/agent.sh
-scripts/wiki-lint.sh
+AGENTS.md  CLAUDE.md  .agents/  scripts/agent.sh  scripts/worker-run.sh  scripts/wiki-lint.sh
+.gitignore içinde  .agents/runs/
 ```
 
 ## Projeye göre düzenle
 
-### AGENTS.md
+- [ ] `AGENTS.md`: proje amacı, layout, katman sınırları, bağımlılık politikası, stack kuralları. Ortak workflow'u kopyalama; `.agents/WORKFLOW.md`'ye yönlendir.
+- [ ] `CLAUDE.md`: Claude'a özel bağlam ve capability sınırları; `AGENTS.md` ile çelişme.
+- [ ] `.agents/ENGINEERING.md`: mimari yön, kodlama/persistence/API/test kuralları, opportunistic refactor yasağı.
+- [ ] `.agents/VERIFICATION.md` ve `scripts/verify.sh`: gerçek build/test/lint/security komutları.
+- [ ] `.agents/VIBECOSYSTEM.md`: yalnız gerçek kurulu capability'ler.
+- [ ] `.agents/config.yaml`: `default_topology`, `canonical_branch`, `knowledge_scope_root`; `pipelines:` tablosunu bilinçli değiştirmeden bırak.
+- [ ] `docs/wiki/`: mevcut LLM Wiki skill'i ile başlat; task yönetimi için kullanma.
+- [ ] Task kaynağı: Markdown (`docs/project/tasks/<ID>.md`, yerleşik `markdown` adapter'ı) veya Linear (kendi adapter'ını yaz).
 
-Ekle:
+## Doğrula
 
-- proje amacı
-- repository layout
-- architecture boundaries
-- dependency policy
-- stack-specific coding rules
-- task-specific olmayan kalıcı repository kuralları
-
-Shared workflow'u kopyalayıp büyütme.
-
-### CLAUDE.md
-
-Ekle:
-
-- Claude Code'a özel proje context'i
-- kullanılabilecek vibecosystem capabilities
-- deterministic mode'da kapalı/izinli Claude özellikleri
-- progressive-disclosure davranışı
-
-AGENTS ile çelişme.
-
-### `.agents/ENGINEERING.md`
-
-Ekle:
-
-- architecture dependency direction
-- coding conventions
-- persistence rules
-- API rules
-- testing rules
-- no-opportunistic-refactor kuralları
-
-### `.agents/VERIFICATION.md`
-
-Gerçek build/test/lint/security komutlarını yaz.
-
-### `scripts/verify.sh`
-
-Projenin gerçekten kullandığı komutları çalıştır.
-
-### `.agents/VIBECOSYSTEM.md`
-
-Yalnız gerçek kurulu capability isimlerini ve mode/profile sınırlarını yaz.
-
-Vibecosystem'i burada yeniden implement etme.
-
-### `docs/wiki`
-
-Mevcut LLM Wiki skill'i ile proje semantic memory'sini başlat.
-
-Wiki'yi task management için kullanma.
-
-## Seç: task management
-
-### Linear
-
-```text
-Linear issue
-→ .agents/runs/<ISSUE-ID>
-```
-
-### Markdown
-
-```text
-docs/project/tasks/<TASK-ID>.md
-→ .agents/runs/<TASK-ID>
-```
+- [ ] `./scripts/agent.sh status` → `active_task=none` (boş `ACTIVE_RUN` normaldir).
+- [ ] `./scripts/verify.sh` ve `./scripts/agent.sh test` geçiyor.
+- [ ] Repository'de tamamlanmış run yok; `.agents/runs/` yalnız geçici ve gitignore'da.
 
 ## İlk kullanım
 
-1. `ACTIVE_RUN` boş olduğunu doğrula.
-2. İlk task'ı tanımla.
-3. Run oluştur.
-4. Run'ı aktive et.
-5. Baseline al.
-6. DISCOVER.
-7. EVIDENCE.
-8. PLAN.
-9. Freeze.
-10. Implement.
-11. Verify.
-12. Review.
-13. CODE DONE.
-14. Task status güncelle.
-15. Gerekliyse wiki ingest/lint.
-16. KNOWLEDGE DONE.
+Tek cümleyle başlat (örnekler: prompt kataloğu):
 
-## Execution role adoption
+```text
+Work on docs/project/tasks/TODO-001.md.
+```
 
-- [ ] Varsayılan `full_lifecycle` execution tanımlı.
-- [ ] Claude standalone `full_lifecycle` kullanabiliyor.
-- [ ] Codex standalone `full_lifecycle` kullanabiliyor.
-- [ ] Açık `implementation_worker` invocation tanımlı.
-- [ ] Worker later lifecycle phase'lerini, delivery'yi ve delegation'ı sahiplenmiyor.
-- [ ] Cross-agent resume ile delegated implementation farklı kavramlar olarak dokümante edildi.
+Agent boot protocol'ü izler: run oluşturur, sınıflandırır, branch açar, baseline alır, gerekli artifact'ları dondurur, tek worker ile implemente eder, bağımsız REVIEW/QA/VERIFY gate'lerini geçirir, completion report'u yayınlar, `delivery-check` yapar, run'ı temizler ve durur. Commit/push/PR için ayrıca açık yetki verirsin.
+
+## Roller ve topology
+
+- [ ] Varsayılan `full_lifecycle` (Orchestrator); Claude Code ve Codex standalone kullanabiliyor.
+- [ ] `default_topology` bilinçli seçildi: `standalone` (Orchestrator RED/GREEN'i yazar) veya `orchestrated` (yalnız `implementation_worker` uygulama kodunu yazar, `scripts/worker-run.sh` ile).
+- [ ] REVIEW/QA/VERIFY bağımsız rollerden geliyor; implementation kendini onaylamıyor.
+- [ ] Worker gate kaydetmiyor, DONE ilan etmiyor, delivery yapmıyor, başka agent çağırmıyor.
+- [ ] Sub-agent'lar bounded; swarm ve recursive delegation yok; implementation tek worker.
 
 ## Anti-pattern'ler
 
-Yapma:
-
-- her task'ta bütün `.agents` dosyalarını okutmak
-- bütün wiki'yi okutmak
-- bütün backlog'u context'e taşımak
-- Linear ve `.agents/runs`'ı aynı şey sanmak
-- wiki'yi sprint board'a çevirmek
-- CLAUDE.md'yi AGENTS.md kopyası yapmak
-- golden reference'taki example run'ı gerçek active task olarak bırakmak
-- verification yerine agent'ın "bitti" demesine güvenmek
+- Her task'ta tüm `.agents` dosyalarını, tüm wiki'yi veya tüm backlog'u okutmak.
+- Prompt'a lifecycle adımlarını, delegation talimatlarını veya stop koşullarını yazmak.
+- Linear/Markdown task'ı ile `.agents/runs`'ı aynı şey sanmak; wiki'yi sprint board yapmak.
+- Run dizinini commit etmek veya bitmiş run'ı arşivlemek.
+- `CLAUDE.md`'yi `AGENTS.md` kopyası yapmak.
+- Verification yerine agent'ın "bitti" demesine güvenmek.

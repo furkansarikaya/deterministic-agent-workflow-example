@@ -1,1150 +1,144 @@
 # Deterministic Agent Workflow — Todo App Uygulama Rehberi
 
-## Amaç
+Bu rehber, bu repository'nin control plane'ini (`AGENTS.md`, `CLAUDE.md`, `.agents/`, `scripts/agent.sh`) gerçek bir projeye nasıl adapte edeceğini **TodoFlow** örneğiyle gösterir. Günlük kullanım, prompt kuralı ve rollerin ayrıntısı için: [Agent Session ve Prompt Rehberi](AGENT-SESSION-VE-PROMPT-REHBERI.md). Task yönetimi: [Linear](TODO-APP-LINEAR-ORNEGI.md) veya [Markdown](TODO-APP-MARKDOWN-PROJE-YONETIMI.md). Kısa liste: [Entegrasyon checklist'i](YENI-PROJE-ENTEGRASYON-CHECKLIST.md).
 
-Bu rehber, `deterministic-agent-workflow-example` yapısını gerçek bir projeye nasıl adapte edeceğini uçtan uca gösterir.
-
-Örnek uygulama:
-
-**TodoFlow** — basit ama gerçekçi bir Todo uygulaması.
-
-Bu örneğin amacı Todo uygulamasını öğretmek değil; aşağıdaki parçaların birlikte nasıl çalıştığını göstermektir:
-
-- `AGENTS.md`
-- `CLAUDE.md`
-- `.agents/`
-- `scripts/agent.sh`
-- vibecosystem
-- LLM Wiki
-- Linear ile görev yönetimi
-- Linear kullanmadan Markdown ile sprint/task yönetimi
-- token/context tasarrufu
-- task lifecycle
-- CODE DONE / KNOWLEDGE DONE ayrımı
+TodoFlow: .NET 9 Web API, PostgreSQL, EF Core, xUnit. Kullanıcı todo oluşturur, listeler, tamamlar, siler. Örneğin amacı Todo uygulamasını öğretmek değil; workflow parçalarının birlikte nasıl çalıştığını göstermektir.
 
 ---
 
-# 1. Örnek Proje
-
-## TodoFlow
-
-Kullanıcı:
-
-- Todo oluşturabilir.
-- Todo listesini görebilir.
-- Todo'yu tamamlandı olarak işaretleyebilir.
-- Todo silebilir.
-- Todo'lara başlık ve açıklama girebilir.
-
-Örnek stack:
-
-```text
-Backend: .NET 9 Web API
-Database: PostgreSQL
-ORM: EF Core
-Tests: xUnit
-API: REST
-```
-
-Bu rehberde özellikle backend üzerinden ilerleyeceğiz.
-
----
-
-# 2. Golden Reference'tan Neleri Kopyalayacağız?
-
-Yeni projen:
-
-```text
-TodoFlow/
-├── AGENTS.md
-├── CLAUDE.md
-├── .agents/
-├── scripts/
-├── docs/
-├── src/
-└── tests/
-```
+## 1. Neyi kopyalar, neyi projeye göre yazarsın?
 
 Golden reference'tan kopyala:
 
 ```text
-AGENTS.md
-CLAUDE.md
-.agents/
-scripts/agent.sh
-scripts/wiki-lint.sh
+AGENTS.md  CLAUDE.md  .agents/  scripts/agent.sh  scripts/worker-run.sh  scripts/wiki-lint.sh  .gitignore (.agents/runs/ satırı)
 ```
 
-Sonra TodoFlow'a göre düzenle:
+Sonra projeye göre yaz:
 
-```text
-AGENTS.md
-CLAUDE.md
-.agents/ENGINEERING.md
-.agents/VERIFICATION.md
-.agents/VIBECOSYSTEM.md
-scripts/verify.sh
-```
+| Dosya | İçerik |
+|---|---|
+| `AGENTS.md` | Projeye özel adapter: proje amacı, repository yapısı, katman sınırları, bağımlılık politikası. Ortak workflow'u tekrar **yazma**; `.agents/WORKFLOW.md`'ye yönlendir. |
+| `CLAUDE.md` | Claude'a özel davranış ve proje bağlamı. `AGENTS.md` ile çelişme; kopyası olma. |
+| `.agents/ENGINEERING.md` | Mimari yön, kodlama, persistence, API, test kuralları. |
+| `.agents/VERIFICATION.md`, `scripts/verify.sh` | Projenin gerçek build/test/lint komutları. |
+| `.agents/VIBECOSYSTEM.md` | Yalnız gerçekten kurulu capability'ler. |
+| `.agents/config.yaml` | `default_topology` (`standalone` veya `orchestrated`), `canonical_branch`, `knowledge_scope_root`; `pipelines:` tablosu genellikle olduğu gibi kalır. |
+| `docs/wiki/` | Mevcut LLM Wiki skill'i ile proje bilgisi (task board değil). |
 
-Bu repository'de tamamlanmış bir run örneği yoktur: `.agents/runs/` geçici çalışma alanıdır (gitignore'dadır) ve görev bitince `agent.sh cleanup` ile silinir.
-
-Ama:
-
-```text
-.agents/ACTIVE_RUN
-```
-
-başlangıçta boş kalmalıdır.
-
----
-
-# 3. AGENTS.md Nasıl Düzenlenmeli?
-
-Golden reference'taki deterministic protocol korunmalıdır.
-
-Ama gerçek proje kendi domain ve repository kurallarını da eklemelidir.
-
-TodoFlow için örnek:
+`AGENTS.md` örneği (yalnız projeye özel kısım):
 
 ```md
 # TodoFlow agent instructions
 
-This repository uses the shared deterministic agent control plane.
-
-Follow `.agents/WORKFLOW.md` for task execution.
+Follow `.agents/WORKFLOW.md` for task execution. Do not restate it here.
 
 ## Project
-
 TodoFlow is a .NET 9 REST API for managing user todos.
 
 ## Repository structure
-
-- `src/TodoFlow.Api` — HTTP/API layer
-- `src/TodoFlow.Application` — use cases
-- `src/TodoFlow.Domain` — domain model
-- `src/TodoFlow.Infrastructure` — EF Core/PostgreSQL
-- `tests/TodoFlow.UnitTests` — unit tests
-- `tests/TodoFlow.IntegrationTests` — integration tests
+- `src/TodoFlow.Api` — HTTP layer; `Application` — use cases; `Domain` — model; `Infrastructure` — EF Core/PostgreSQL
+- `tests/TodoFlow.UnitTests`, `tests/TodoFlow.IntegrationTests`
 
 ## Project rules
-
-- Target framework is .NET 9.
-- Nullable reference types remain enabled.
-- Do not introduce a new NuGet dependency unless TASK explicitly allows it.
-- Controllers/endpoints must not contain business logic.
-- Application use cases own orchestration.
-- Domain invariants belong in Domain.
-- Persistence implementation belongs in Infrastructure.
-- Async I/O must accept CancellationToken where applicable.
-- Public API changes require tests.
-- Database schema changes require EF migration.
-- Do not perform opportunistic refactoring outside frozen task scope.
-
-## Verification
-
-Use `./scripts/verify.sh`.
-
-The task is not CODE DONE until required build/tests/scope/review gates pass.
+- Nullable reference types stay enabled; no new NuGet package unless TASK allows it.
+- Endpoints hold no business logic; domain invariants live in Domain.
+- Schema changes require an EF migration; public API changes require tests.
+- Verification is `./scripts/verify.sh`.
 ```
 
-## Önemli
-
-`AGENTS.md`:
-
-- shared workflow'u tekrar yazmamalı,
-- projeye özel kuralları söylemeli,
-- repository yapısını tarif etmeli,
-- agent'ın yanlış layer'a kod yazmasını engellemeli.
-
-Yani:
-
-```text
-.agents/*
-    = ortak execution policy
-
-AGENTS.md
-    = bu repository'nin Codex/project adapter'ı
-```
-
----
-
-# 4. CLAUDE.md Nasıl Düzenlenmeli?
-
-`CLAUDE.md`, `AGENTS.md` ile yarışmamalıdır.
-
-Claude Code'a özel davranışları ve TodoFlow bağlamını eklemelidir.
-
-Örnek:
-
-```md
-# TodoFlow Claude Code adapter
-
-Follow `AGENTS.md` and the shared `.agents/` control plane.
-
-## TodoFlow context
-
-This is a .NET 9 layered Web API.
-
-Primary solution:
-
-- `TodoFlow.sln`
-- `src/TodoFlow.Api`
-- `src/TodoFlow.Application`
-- `src/TodoFlow.Domain`
-- `src/TodoFlow.Infrastructure`
-- `tests/*`
-
-Use project-specific rules from `AGENTS.md`.
-
-## Claude-specific rules
-
-- Do not use memory, recall, self-learning writes, prompt auto-improvement, or swarm during deterministic implementation unless explicitly permitted.
-- Do not let persistent planning files override the frozen `.agents/runs/<TASK>/PLAN.md`.
-- Use subagents only when allowed by the effective mode.
-- Reviewer and verifier do not replace repository verification commands.
-- Load context progressively; do not bulk-read `.agents/**`, `docs/wiki/**`, old runs, or the entire session history.
-
-## Project capability preference
-
-When useful and permitted:
-
-- use TDD guidance for domain/application behavior,
-- use code review after implementation,
-- use verifier for acceptance checks,
-- use security review only for security-sensitive changes.
-
-Do not invoke broad orchestration for small TodoFlow tasks.
-```
-
----
-
-# 5. ENGINEERING.md Projeye Göre Düzenleme
-
-Örnek:
+`.agents/ENGINEERING.md` örneği:
 
 ```md
 # TodoFlow engineering rules
-
-## Architecture
-
-Dependency direction:
-
-Api → Application → Domain
-
-Infrastructure implements interfaces required by Application/Domain.
-
-Domain must not reference Infrastructure or ASP.NET Core.
-
-## API
-
-- REST endpoints use explicit request/response models.
-- Validate external input before state mutation.
-- Return appropriate HTTP status codes.
-- Do not expose EF entities directly.
-
-## Persistence
-
-- PostgreSQL + EF Core.
-- Use migrations for schema changes.
-- Use `AsNoTracking()` for read-only queries where appropriate.
-- Avoid N+1 query patterns.
-
-## Testing
-
-- Domain rules: unit tests.
-- Application behavior: unit or focused integration tests.
-- HTTP/database contracts: integration tests where relevant.
-
-## Scope discipline
-
-Do not rename unrelated types, reorganize directories, or upgrade packages unless required by TASK.
+Dependency direction: Api → Application → Domain; Infrastructure implements Application/Domain interfaces.
+Domain must not reference Infrastructure or ASP.NET Core. Validate external input before state mutation.
+Do not expose EF entities directly. Use migrations for schema changes.
+Do not rename unrelated types, reorganize directories, or upgrade packages unless TASK requires it.
 ```
 
----
+`scripts/verify.sh` (gerçek komutlarına göre):
 
-# 6. VERIFICATION.md ve verify.sh
-
-`VERIFICATION.md` neyin kontrol edilmesi gerektiğini anlatır.
-
-Örnek:
-
-```md
-# TodoFlow verification
-
-Minimum verification:
-
-1. `dotnet restore`
-2. `dotnet build --no-restore`
-3. `dotnet test --no-build`
-4. `./scripts/agent.sh verify-freeze <TASK-ID>`
-5. `./scripts/agent.sh verify-scope <TASK-ID>`
-
-For DB changes:
-- migration exists,
-- model snapshot is consistent,
-- relevant integration tests pass.
-```
-
-`scripts/verify.sh`:
-
-```bash
+```sh
 #!/bin/sh
 set -eu
-
 dotnet restore
 dotnet build --no-restore
 dotnet test --no-build
 ```
 
-Gerçek projede test projeleri veya solution yolu gerekiyorsa ona göre değiştir.
-
 ---
 
-# 7. İlk Task'tan Önce
+## 2. Başlamadan önce
 
-Kontrol et:
-
-```bash
-./scripts/agent.sh status
-```
-
-Beklenen:
-
-```text
-active_task=none
-implementation_allowed=false
-```
-
-Bu normaldir.
-
-Golden template'in resting state'i budur.
-
----
-
-# 8. Linear Kullanarak Çalışma
-
-Linear burada **iş yönetim sistemi**dir.
-
-`.agents/runs` ise **execution contract/audit** alanıdır.
-
-Bunlar birbirinin yerine geçmez.
-
-```text
-Linear
-    ↓
-hangi iş yapılacak?
-
-.agents/runs/<TASK>
-    ↓
-bu iş agent tarafından nasıl güvenli/deterministik yapılacak?
-```
-
----
-
-# 9. Linear Yapısı
-
-Örnek Team:
-
-```text
-TodoFlow
-```
-
-Örnek Project:
-
-```text
-TodoFlow MVP
-```
-
-Örnek Cycle:
-
-```text
-Sprint 1 — Todo Core
-```
-
-Issue'lar:
-
-```text
-TODO-1 Create todo
-TODO-2 List todos
-TODO-3 Complete todo
-TODO-4 Delete todo
-```
-
----
-
-# 10. Linear Issue Örneği
-
-## TODO-1 — Create todo endpoint
-
-Description:
-
-```md
-Implement todo creation.
-
-Acceptance Criteria:
-
-- POST `/api/v1/todos`
-- Request contains `title` and optional `description`
-- Empty title is rejected
-- Created todo defaults to incomplete
-- Todo is persisted
-- Response is HTTP 201
-- Unit/integration tests cover success and invalid title
-
-Constraints:
-
-- No new NuGet packages
-- Follow existing architecture
-- Do not implement update/delete/list behavior in this task
-```
-
-Bu issue agent'ın TASK contract'ına dönüşür.
-
----
-
-# 11. Linear Issue → Deterministic Run
-
-Yeni run:
-
-```text
-.agents/runs/TODO-1/
-├── TASK.md
-├── EVIDENCE.md      (TRIVIAL dışında)
-├── PLAN.md
-├── QA_PLAN.md       (STANDARD ve üstü)
-└── RUN.yaml
-```
-
-Bu görev tipine göre gerekli dosyalar `agent.sh classify` ile seçilir (TRIVIAL / STANDARD / COMPLEX / CRITICAL; ayrıntı `.agents/WORKFLOW.md`). REVIEW.md, QA_REPORT.md ve VERIFY.md bağımsız rollerin gate'leriyle birlikte, COMPLETION_REPORT.md ise sonuç olarak oluşur.
-
-`.agents/ACTIVE_RUN`:
-
-```text
-TODO-1
-```
-
-Sonra:
-
-```bash
-./scripts/agent.sh baseline TODO-1
-```
-
-## TASK.md
-
-Linear issue'dan normalize edilir:
-
-```md
-# TODO-1 — Create todo endpoint
-
-## Goal
-
-Implement todo creation.
-
-## Acceptance criteria
-
-- AC-1: POST `/api/v1/todos` exists.
-- AC-2: title is required.
-- AC-3: description is optional.
-- AC-4: a created todo starts incomplete.
-- AC-5: todo is persisted.
-- AC-6: API returns HTTP 201.
-- AC-7: relevant tests pass.
-
-## Constraints
-
-- No new NuGet dependencies.
-- Do not implement unrelated todo operations.
-- Preserve current layered architecture.
-```
-
-Linear issue source/reference ID gerekiyorsa TASK'e referans olarak eklenebilir.
-
----
-
-# 12. DISCOVER
-
-Agent önce:
-
-```text
-TASK
-↓
-relevant source
-↓
-relevant tests
-```
-
-okur.
-
-Örneğin:
-
-```text
-src/TodoFlow.Api
-src/TodoFlow.Application
-src/TodoFlow.Domain
-src/TodoFlow.Infrastructure
-tests/
-```
-
-ama yalnız task için ilgili dosyaları.
-
-**Bütün repository'yi modele doldurmaz.**
-
-Wiki ancak repo/testlerden cevap çıkmıyorsa kullanılır.
-
----
-
-# 13. EVIDENCE.md Örneği
-
-```md
-# Evidence — TODO-1
-
-## Repository
-
-- Existing API uses Minimal APIs.
-- Application layer uses command handlers.
-- `TodoItem` does not yet exist.
-- PostgreSQL DbContext lives in `TodoFlow.Infrastructure`.
-
-## Relevant references
-
-- `src/TodoFlow.Api/Program.cs`
-- `src/TodoFlow.Application/...`
-- `src/TodoFlow.Infrastructure/Persistence/AppDbContext.cs`
-- `tests/TodoFlow.IntegrationTests/...`
-
-## Constraints derived from evidence
-
-- New endpoint must follow existing route-group style.
-- Persistence must use the existing DbContext.
-- No new package is required.
-
-## Wiki
-
-Not queried; current repository and tests were sufficient.
-```
-
-Burada özellikle:
-
-> "Wiki kullanmadım."
-
-demek gayet geçerli.
-
-Wiki zorunlu değildir.
-
----
-
-# 14. PLAN.md Örneği
-
-```md
----
-scope:
-  - path: src/TodoFlow.Domain/Todos/TodoItem.cs
-    criteria: [AC-2, AC-3, AC-4]
-  - path: src/TodoFlow.Application/Todos/CreateTodo/*
-    criteria: [AC-2, AC-3, AC-4, AC-5]
-  - path: src/TodoFlow.Api/Endpoints/TodoEndpoints.cs
-    criteria: [AC-1, AC-6]
-  - path: src/TodoFlow.Infrastructure/Persistence/AppDbContext.cs
-    criteria: [AC-5]
-  - path: src/TodoFlow.Infrastructure/Persistence/Migrations/*
-    criteria: [AC-5]
-  - path: tests/TodoFlow.IntegrationTests/Todos/CreateTodoTests.cs
-    criteria: [AC-1, AC-2, AC-4, AC-5, AC-6, AC-7]
----
-
-# Plan
-
-1. Add TodoItem domain model.
-2. Add create-todo application use case.
-3. Map persistence.
-4. Add migration.
-5. Expose POST endpoint.
-6. Add focused tests.
-7. Run verification.
-```
-
-Plan **uygulama scope'u**dur.
-
-Workflow metadata'yı buraya eklemeye gerek yok.
-
----
-
-# 15. Freeze
-
-```bash
-./scripts/agent.sh freeze TODO-1
-./scripts/agent.sh verify-freeze TODO-1
-```
-
-Bundan sonra TASK/EVIDENCE/PLAN contract'tır.
-
-Agent kafasına göre scope genişletemez.
-
----
-
-# 16. Implement
-
-Şimdi kod yazılır.
-
-Deterministic mode:
-
-- swarm açmaz,
-- unrelated wiki okumaz,
-- başka Linear issue'larına geçmez,
-- fırsat bulmuşken refactor yapmaz,
-- memory/self-learning ile scope değiştirmez.
-
----
-
-# 17. Verify
-
-```bash
+```sh
+./scripts/agent.sh status     # beklenen: active_task=none, implementation_allowed=false
 ./scripts/verify.sh
-./scripts/agent.sh verify-freeze TODO-1
-./scripts/agent.sh verify-scope TODO-1
+./scripts/agent.sh test       # control plane kendi self-test'leri (birkaç dakika)
 ```
 
-Sonra review/verifier.
-
-CODE DONE ancak tüm acceptance criteria karşılandıysa oluşur.
+`ACTIVE_RUN` boş olmalıdır; boş selector geçerli "task yok" durumudur ve implementation'ı bloklar. Repository'de tamamlanmış run örneği **yoktur**: `.agents/runs/` geçici çalışma alanıdır, gitignore'dadır ve task bitince `agent.sh cleanup` ile silinir.
 
 ---
 
-# 18. Linear Status Güncelleme
+## 3. Bir task'ı başlatmak
 
-Örnek lifecycle:
-
-```text
-Linear Todo
-    ↓
-agent run created
-    ↓
-Linear In Progress
-    ↓
-CODE DONE
-    ↓
-Linear Done
-```
-
-İstersen review bekleyen takımda:
+Task'ı tek cümleyle ver (ayrıntı ve örnekler: [prompt kataloğu](AGENT-SESSION-VE-PROMPT-REHBERI.md#6-prompt-kataloğu)):
 
 ```text
-Todo
-→ In Progress
-→ In Review
-→ Done
+Work on docs/project/tasks/TODO-001.md.
+```
+```text
+docs/project/tasks/TODO-001.md task'ı üzerinde çalış.
 ```
 
-kullanabilirsin.
+Gerisini agent, `AGENTS.md`'deki boot protocol ile yapar: run dizinini şablonlardan oluşturur ve aktive eder, task'ı sınıflandırır, task branch'ini açar, baseline alır, DISCOVER'ı read-only yürütür, sınıfın gerektirdiği evidence/plan/QA planını üretip dondurur, tek worker ile implemente eder, bağımsız gate'leri geçirir, completion report'u yayınlar ve run'ı temizleyip durur.
 
-Önemli kural:
+### TODO-001 (`Create todo`) için ne beklenir?
 
-> Linear status workflow state'in yerine geçmez.
+Sınırlı, tek bileşenli bir endpoint olduğu için sınıf **STANDARD**'dır: `EVIDENCE.md` (repository'deki mevcut katman ve pattern'ler; wiki yalnız gerekirse), `PLAN.md` (YAML `scope:` yolları ve her yolun acceptance kriteri), `QA_PLAN.md` (başlık zorunlu, boş başlık reddi, HTTP 201, kalıcılık), sonra QA ve VERIFY gate'leri. Auth eklenseydi CRITICAL, birden fazla katmanı ve migration'ı değiştiren bir iş COMPLEX olurdu ve REVIEW gate'i de zorunlu hale gelirdi. TDD kanıtı (RED sonra GREEN) her scope yolu için gerekir; RED/GREEN'in gerçekten uygulanamadığı yol için PLAN'da gerekçeli `tdd_exemption` yazılır.
 
-Linear "Done" yazıyor diye `verify-scope` geçilmiş sayılmaz.
+### Ne değişmez, ne değişebilir?
+
+- **Frozen** TASK, EVIDENCE, PLAN ve QA_PLAN sonradan sessizce değişmez; eksik bilgi amendment + `refreeze` ister.
+- Task kaynağının (`TODO-001.md`) sözleşme kısmı freeze'den sonra değişirse `freshness` bloklar; yalnız `Status` satırı ve yayınlanan completion report bloğu bookkeeping'dir.
+- Kapsam dışı bir dosyaya ihtiyaç doğarsa implementer durur ve Orchestrator karar verir.
 
 ---
 
-# 19. Linear Comment Örneği
+## 4. Bitiş
 
-Task bittiğinde issue'ya kısa execution summary yazılabilir:
+`CODE_DONE` yalnız gerekli gate'lerin final ağaç üzerinde geçtiğini söyler. `DONE` için ayrıca knowledge adımı (`not_applicable` olabilir), gerçek run kanıtından türetilmiş `COMPLETION_REPORT.md` ve onun task kaynağına yayınlanıp doğrulanması gerekir. Ardından:
 
-```md
-Implemented TODO-1.
-
-Changed:
-- Todo domain model
-- CreateTodo application flow
-- POST /api/v1/todos
-- EF migration
-- integration tests
-
-Verification:
-- dotnet build: PASS
-- dotnet test: PASS
-- deterministic freeze: PASS
-- scope verification: PASS
-
-No new dependencies added.
+```sh
+./scripts/agent.sh delivery-check TODO-001   # yerel teslim hazırlığı; uzaktan bir şey yapmaz
+./scripts/agent.sh cleanup TODO-001          # run dizini silinir, ACTIVE_RUN boşalır
 ```
 
-Bu comment audit için faydalıdır ama `.agents/runs/TODO-1/COMPLETION_REPORT.md` yerine geçmez.
+Commit/push/PR ve task-system yazımı senin ayrı ve açık yetkinle yapılır. Kalıcı kayıt: task dosyasındaki completion report, kod/test ve Git geçmişi; wiki yalnız kalıcı bir sözleşme veya karar değiştiyse güncellenir.
 
 ---
 
-# 20. Linear Olmadan Markdown ile Yönetim
-
-Linear istemiyorsan task management'ı repository içinde Markdown ile yapabilirsin.
-
-Ama `.agents/runs` içine sprint backlog doldurma.
-
-Ayır:
+## 5. Üç ayrı alan
 
 ```text
-project management
-    → docs/project/
-
-deterministic execution
-    → .agents/runs/
+docs/project/  veya  Linear   → ne yapılacak? (task yönetimi)
+.agents/runs/<TASK>            → bu iş şu an nasıl güvenli yürütülüyor? (geçici execution state)
+docs/wiki/                     → proje bunu neden böyle biliyor/yapıyor? (kalıcı bilgi)
 ```
 
-Önerilen yapı:
-
-```text
-docs/
-└── project/
-    ├── ROADMAP.md
-    ├── BACKLOG.md
-    ├── sprints/
-    │   ├── SPRINT-001.md
-    │   └── SPRINT-002.md
-    └── tasks/
-        ├── TODO-001.md
-        ├── TODO-002.md
-        └── TODO-003.md
-```
+Birbirinin yerine geçmezler. Wiki sprint board değildir; run kalıcı arşiv değildir; task dosyası execution state tutmaz. Ayrıntı: [Markdown](TODO-APP-MARKDOWN-PROJE-YONETIMI.md), [Linear](TODO-APP-LINEAR-ORNEGI.md).
 
 ---
 
-# 21. ROADMAP.md Örneği
+## 6. Token / context disiplini
 
-```md
-# TodoFlow Roadmap
-
-## MVP
-
-- Create todo
-- List todos
-- Complete todo
-- Delete todo
-
-## Later
-
-- Due dates
-- Tags
-- Priority
-- Authentication
-- Shared lists
-```
+Agent yalnız aktif task'ı ve ilgili repository/test kanıtını okur. Yüklemez: tüm `.agents/**`, tüm `docs/wiki/**`, tüm backlog/sprint/Linear geçmişi, session geçmişi. Kontrol belgeleri yalnız işlemin ihtiyaç duyduğunda yüklenir; wiki'ye index'ten başlanır ve yalnız task/repository/test cevap vermiyorsa bakılır. Explorer'lar ham dosya içeriği değil, kaynak referanslı kısa bulgu döndürür; Reviewer'ın bağlamı task/kriter, frozen plan referansları ve ilgili diff/testlerdir, Verifier'ınki daha da dardır. Sub-agent'ların toplam token'ı garanti olarak azalttığı iddia edilmez; amaç ana bağlamı temiz ve tekrarlı araştırmayı az tutmaktır.
 
 ---
 
-# 22. BACKLOG.md Örneği
+## 7. Kontrol listeleri
 
-```md
-# Backlog
+**Bir kerelik:** `AGENTS.md`/`CLAUDE.md` projeye özel; `ENGINEERING.md`, `VERIFICATION.md`, `verify.sh` gerçek komutlar; `config.yaml` topology/branch; `.gitignore`'da `.agents/runs/`; `ACTIVE_RUN` boş; `agent.sh status` ve `agent.sh test` geçiyor; wiki başlatıldı; task kaynağı seçildi.
 
-| ID | Title | Priority | Status | Sprint |
-|---|---|---|---|---|
-| TODO-001 | Create todo | High | Todo | SPRINT-001 |
-| TODO-002 | List todos | High | Todo | SPRINT-001 |
-| TODO-003 | Complete todo | High | Todo | SPRINT-002 |
-| TODO-004 | Delete todo | Medium | Todo | SPRINT-002 |
-```
-
----
-
-# 23. SPRINT-001.md Örneği
-
-```md
-# Sprint 001 — Todo Foundation
-
-## Goal
-
-Users can create and view todos.
-
-## Tasks
-
-- [ ] [[../tasks/TODO-001]]
-- [ ] [[../tasks/TODO-002]]
-
-## Definition of Done
-
-- Acceptance criteria satisfied
-- Build passes
-- Tests pass
-- Deterministic scope verification passes
-- Review/verifier complete
-- Relevant wiki knowledge updated after CODE DONE
-```
-
----
-
-# 24. Markdown Task Örneği
-
-`docs/project/tasks/TODO-001.md`
-
-```md
-# TODO-001 — Create todo
-
-Status: Todo
-Priority: High
-Sprint: SPRINT-001
-
-## Goal
-
-Allow users to create a todo.
-
-## Acceptance Criteria
-
-- POST `/api/v1/todos`
-- title required
-- description optional
-- new todo incomplete
-- persistence succeeds
-- returns HTTP 201
-- tests pass
-
-## Constraints
-
-- no new packages
-- no unrelated CRUD operations
-```
-
-Bu dosya project-management source olabilir.
-
-Ama aktif execution başladığında bunun normalize edilmiş contract'ı yine:
-
-```text
-.agents/runs/TODO-001/TASK.md
-```
-
-olur.
-
-Böylece backlog dosyasının sonradan değişmesi frozen execution contract'ı etkilemez.
-
----
-
-# 25. Markdown Status Akışı
-
-Task başlarken:
-
-```text
-Status: Todo
-```
-
-→
-
-```text
-Status: In Progress
-```
-
-CODE DONE sonrası:
-
-```text
-Status: Done
-```
-
-Sprint dosyasındaki checkbox da güncellenebilir.
-
-Ama bunlar **Transaction A sırasında scope dışıysa** kafana göre düzenlenmez.
-
-Task management metadata güncellemesinin hangi aşamada yapılacağı proje policy'sinde açıkça tanımlanmalıdır.
-
-Basit tercih:
-
-```text
-task activation:
-  status → In Progress
-
-CODE DONE:
-  status → Done
-```
-
----
-
-# 26. Linear ve Markdown Arasında Seçim
-
-| İhtiyaç | Linear | Markdown |
-|---|---:|---:|
-| Takım çalışması | Çok iyi | Orta |
-| Assignee | Çok iyi | Manuel |
-| Sprint/Cycle | Yerleşik | Kendin yönetirsin |
-| Filtreleme | Çok iyi | Git/search |
-| Offline/Git-backed | Hayır | Evet |
-| Basit solo proje | Gereğinden fazla olabilir | Çok iyi |
-| Otomasyon | Çok iyi | Script gerekebilir |
-| Deterministic run entegrasyonu | Referans ID ile | Dosya referansı ile |
-
-Öneri:
-
-```text
-Solo / küçük open-source
-→ Markdown yeterli
-
-Takım / ürün / çok task
-→ Linear daha iyi
-```
-
----
-
-# 27. LLM Wiki ile Project Management Aynı Şey Değildir
-
-Üç alanı karıştırma:
-
-```text
-Linear veya docs/project
-    = yapılacak işler
-
-.agents/runs
-    = aktif execution contract + proof
-
-docs/wiki
-    = proje bilgisi, kararlar, lessons, semantic memory
-```
-
-Örnek:
-
-```text
-"Complete todo endpoint yap"
-    → task management
-
-"Bu task hangi dosyaları değiştirebilir?"
-    → deterministic run
-
-"Neden soft delete yerine hard delete seçmiştik?"
-    → wiki decision
-```
-
----
-
-# 28. CODE DONE Sonrası Wiki
-
-Task tamamlanınca gerekli ise:
-
-```text
-/wiki-ingest
-↓
-wiki decisions / lessons / entities
-↓
-/wiki-lint
-↓
-KNOWLEDGE DONE
-```
-
-Her task wiki'ye büyük bir şey yazmak zorunda değildir.
-
-Örneğin yalnız basit endpoint implementasyonu yeni reusable knowledge üretmediyse minimal update yeterlidir.
-
----
-
-# 29. Token / Context Kullanımı
-
-Amaç:
-
-> determinism için tüm projeyi context'e yüklemek değildir.
-
-Başlangıç:
-
-```text
-TASK
-+ relevant repo files
-+ relevant tests
-```
-
-Yetiyorsa devam et.
-
-Yetmiyorsa:
-
-```text
-canonical docs
-```
-
-Yetmiyorsa:
-
-```text
-relevant wiki
-```
-
-## Okunmaması gerekenler
-
-Küçük TODO-1 task'ında otomatik olarak:
-
-```text
-docs/wiki/** tamamı
-.agents/** tamamı
-eski runs tamamı
-tüm Linear backlog
-tüm sprintler
-tüm session history
-```
-
-okunmamalıdır.
-
----
-
-# 30. Reviewer Context
-
-Reviewer'a ideal olarak:
-
-```text
-TASK
-acceptance criteria
-PLAN
-relevant evidence references
-git diff
-relevant tests
-```
-
-verilir.
-
-Tüm chat geçmişi verilmez.
-
----
-
-# 31. Verifier Context
-
-Daha küçük:
-
-```text
-acceptance criteria
-verification commands
-results
-scope summary
-relevant diff
-```
-
----
-
-# 32. TodoFlow Tam Akış Örneği
-
-```text
-Linear TODO-1
-      |
-      v
-create .agents/runs/TODO-1
-      |
-      v
-ACTIVE_RUN=TODO-1
-      |
-      v
-agent.sh baseline TODO-1
-      |
-      v
-DISCOVER
-      |
-      v
-EVIDENCE
-      |
-      v
-PLAN
-      |
-      v
-FREEZE
-      |
-      v
-IMPLEMENT
-      |
-      v
-BUILD + TEST
-      |
-      v
-VERIFY SCOPE
-      |
-      v
-REVIEW + VERIFIER
-      |
-      v
-CODE DONE
-      |
-      +------> Linear Done
-      |
-      v
-/wiki-ingest
-      |
-      v
-/wiki-lint
-      |
-      v
-KNOWLEDGE DONE
-```
-
-Markdown kullanıyorsan ilk ve sondaki Linear yerine:
-
-```text
-docs/project/tasks/TODO-001.md
-```
-
-güncellenir.
-
----
-
-# 33. Proje Kurulurken Bir Kerelik Checklist
-
-- [ ] Golden control-plane dosyaları kopyalandı.
-- [ ] `ACTIVE_RUN` boş.
-- [ ] `AGENTS.md` proje yapısına göre düzenlendi.
-- [ ] `CLAUDE.md` proje/Claude adapter olarak düzenlendi.
-- [ ] `ENGINEERING.md` stack ve architecture kurallarını içeriyor.
-- [ ] `VERIFICATION.md` gerçek build/test komutlarını içeriyor.
-- [ ] `verify.sh` gerçek projeyi doğruluyor.
-- [ ] vibecosystem capability isimleri kurulu profile göre doğrulandı.
-- [ ] `docs/wiki` proje semantic-memory düzenine göre başlatıldı.
-- [ ] Linear veya Markdown task management yaklaşımı seçildi.
-- [ ] İlk task açılmadan implementation yapılmıyor.
-
----
-
-# 34. Her Task İçin Checklist
-
-- [ ] Task source belli: Linear issue veya Markdown task.
-- [ ] Run oluşturuldu.
-- [ ] `ACTIVE_RUN` ayarlandı.
-- [ ] Baseline alındı.
-- [ ] DISCOVER read-only tamamlandı.
-- [ ] EVIDENCE concise.
-- [ ] PLAN scope + AC mapping hazır.
-- [ ] Freeze doğrulandı.
-- [ ] Implementation yalnız scope içinde.
-- [ ] Tests/build geçti.
-- [ ] Scope geçti.
-- [ ] Review/verifier tamamlandı.
-- [ ] CODE DONE.
-- [ ] Task manager status güncellendi.
-- [ ] Gerekliyse wiki ingest/lint.
-- [ ] KNOWLEDGE DONE.
-
----
-
-# 35. Son Kural
-
-Bu sistemin amacı agent'a daha fazla bürokrasi yaptırmak değildir.
-
-İdeal davranış:
-
-```text
-küçük task
-→ küçük context
-→ küçük plan
-→ küçük diff
-→ net verification
-
-büyük task
-→ ihtiyaç kadar evidence
-→ ihtiyaç kadar context
-→ explicit scope
-→ güçlü verification
-```
-
-Control plane işi kolaylaştırmıyorsa yanlış kullanılıyordur.
-
----
-
-# 36. TodoFlow execution seçenekleri
-
-TodoFlow task'ı üç şekilde yürütülebilir:
-
-```text
-Claude-only  → Claude full_lifecycle; VERIFY/REVIEW Claude'da
-Codex-only   → Codex full_lifecycle; VERIFY/REVIEW Codex'te
-Claude + Codex → Claude plan/freeze/VERIFY/REVIEW, Codex implementation_worker
-```
-
-Üçüncü modelde Codex frozen contract içindeki implementation'dan sonra
-Claude'a döner. Codex worker PLAN'ı değiştirmez, review yapmaz veya CODE
-DONE işaretlemez. Claude VERIFY/REVIEW fail bulursa aynı bounded scope
-içinde focused fix için worker'ı yeniden çağırabilir.
-
-Claude'dan Codex'e normal session devri ise worker delegation değildir:
-Codex normal başlatıldıysa `full_lifecycle` olarak aynı run'a repository
-state'ten devam eder.
+**Her task için (agent yapar, sen kontrol edersin):** doğru sınıf (`agent.sh pipeline <ID>`); frozen scope acceptance kriterlerine bağlı; gerekli gate'ler final ağaçta geçti; `delivery-check` temiz; completion report yayınlandı; run temizlendi; teslim için açık yetkin verildi.

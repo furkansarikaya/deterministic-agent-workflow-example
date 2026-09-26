@@ -98,7 +98,7 @@ DISCOVER is read-only and uses progressive disclosure: TASK plus the smallest su
 
 ## Execution topology
 
-Role says what an invocation may do; topology says whether a run needs a *second, delegated* implementation owner. Resolved by `agent.sh resolve_topology` from `RUN.yaml`'s `execution.topology`, else `.agents/config.yaml`'s `default_topology`; invalid on both fails closed.
+Role says what an invocation may do; topology says whether a run needs a *second, delegated* implementation owner. Resolved by `resolve_topology` (in `scripts/agent.sh`) from `RUN.yaml`'s `execution.topology`, else `.agents/config.yaml`'s `default_topology`; invalid on both fails closed.
 
 - **`standalone`** — the `full_lifecycle` agent owns RED/GREEN/REFACTOR itself. No worker delegation.
 - **`orchestrated`** — the Orchestrator does not implement application code. RED, GREEN, REFACTOR and every review/QA/verification/amendment fix belong to `implementation_worker`, invoked only through `scripts/worker-run.sh`; a failed invocation leaves the task incomplete and never falls back to the Orchestrator implementing it.

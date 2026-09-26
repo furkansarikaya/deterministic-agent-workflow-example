@@ -16,7 +16,7 @@ The canonical workflow is `.agents/WORKFLOW.md`: a deterministic orchestrator, b
 
 `AGENT_ROLE` is invocation-scoped, never agent identity: the default `full_lifecycle` is the Orchestrator and lets either Claude or Codex own the whole lifecycle. A session explicitly delegated a bounded role (`implementation_worker`, `explorer`, `architect`, `independent_qa`, `independent_reviewer`, `independent_verifier`) obeys that role's boundary in `.agents/WORKFLOW.md`, returns its result to the orchestrator, and cannot plan, freeze, advance the task, deliver, or delegate. Only the Orchestrator declares DONE. There is no swarm and no recursive delegation; implementation has exactly one worker.
 
-Execution topology (`./scripts/agent.sh resolve_topology`) is separate from role: under `standalone`, `full_lifecycle` implements RED/GREEN itself; under `orchestrated` it must delegate implementation to `implementation_worker` through `scripts/worker-run.sh` and must not implement application code — and a failed worker invocation leaves the task incomplete rather than licensing self-implementation.
+Execution topology (`execution.topology` in `RUN.yaml`, else `default_topology` in `.agents/config.yaml`) is separate from role: under `standalone`, `full_lifecycle` implements RED/GREEN itself; under `orchestrated` it must delegate implementation to `implementation_worker` through `scripts/worker-run.sh` and must not implement application code — and a failed worker invocation leaves the task incomplete rather than licensing self-implementation.
 
 ## Rules that always apply
 

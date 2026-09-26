@@ -4,14 +4,14 @@
 
 Linear kullanmak istemeyen ekipler için Git-backed project management örneği.
 
-Deterministic execution dosyaları ile project-management dosyalarını ayır.
+Deterministic execution dosyaları ile project-management dosyalarını ayır. Genel model ve prompt kuralı: [Agent Session ve Prompt Rehberi](AGENT-SESSION-VE-PROMPT-REHBERI.md).
 
 ```text
 docs/project/
     = roadmap/backlog/sprint/task yönetimi
 
 .agents/runs/
-    = deterministic execution contract
+    = geçici execution state (task bitince silinir, commit edilmez)
 
 docs/wiki/
     = semantic project knowledge
@@ -87,7 +87,7 @@ Users can create and list todos.
 - build passes
 - tests pass
 - deterministic scope passes
-- required gates (REVIEW/QA/VERIFY per classification) passed
+- required gates (REVIEW/QA/VERIFY per classification) passed on the final tree
 ```
 
 ## Task
@@ -123,67 +123,26 @@ Allow users to create a todo.
 
 ## Execution'a geçiş
 
-Task management dosyasından execution contract oluştur:
+Task dosyası run'ın task kaynağıdır (`task_source.type: local_markdown`); agent onun kabul kriterlerini ve kısıtlarını run'daki `TASK.md` sözleşmesine dönüştürür:
 
 ```text
-docs/project/tasks/TODO-001.md
+docs/project/tasks/TODO-001.md   (kalıcı task kaynağı)
         ↓ normalize
-.agents/runs/TODO-001/TASK.md
+.agents/runs/TODO-001/TASK.md    (geçici; freeze'den sonra değişmez)
 ```
 
-Bu önemli.
+Freeze'den sonra task dosyasının **sözleşme kısmı** değişirse `freshness` bloklar ve amendment + `refreeze` gerekir. Yalnız `**Status:**` değeri ve yayınlanan `## Completion Report` bloğu bookkeeping'dir; dosyanın konumu (ör. `in-progress/` → `done/`) yalnız `agent.sh task-source-relocate` ile kaydedilir.
 
-Sprint/task dosyası daha sonra değişebilir; frozen deterministic TASK
-otomatik değişmez. Ancak run `local_markdown` task source kullanıyorsa
-canonical source değişikliği freshness gate'ini bloklar ve amendment /
-refreeze gerektirir.
-
-## Başlatma
+## Başlatma ve bitirme
 
 ```text
-TODO-001 Status: In Progress
+Work on docs/project/tasks/TODO-001.md.
 ```
-
-`.agents/ACTIVE_RUN`:
-
 ```text
-TODO-001
+docs/project/tasks/TODO-001.md task'ı üzerinde çalış.
 ```
 
-Sonra:
-
-```bash
-./scripts/agent.sh baseline TODO-001
-```
-
-Ve normal lifecycle.
-
-## Bitirme
-
-CODE DONE sonrası:
-
-```text
-TODO-001 Status: Done
-```
-
-`SPRINT-001.md`:
-
-```md
-- [x] [[../tasks/TODO-001]]
-```
-
-Task management güncellemelerinin application implementation scope'u ile karışmaması için proje policy'sinde ne zaman güncellenecekleri açıkça belirlenmelidir.
-
-Basit yaklaşım:
-
-```text
-activation transaction:
-    status → In Progress
-
-completion transaction:
-    status → Done
-    sprint checkbox → completed
-```
+Agent run'ı oluşturur, sınıflandırır, çalıştırır, completion report'u **bu task dosyasına** yayınlar (`markdown` adapter'ı) ve run'ı temizleyip durur. Task dosyasındaki `Status` ve sprint checkbox'ı uygulama scope'undan ayrı bookkeeping'dir. Aktivasyondaki `Status → In Progress` düzenlemesi baseline'dan **önce** yapılırsa baseline onu kullanıcı işi olarak kaydeder; freeze'den sonra scope dışı bir `docs/project/` düzenlemesi ise scope kontrolünde "unmapped path" olarak görünür (task kaynağı için tek istisna, completion report yayınlandıktan sonraki yazımdır). Bu yüzden bookkeeping'i ya baseline'dan önce/yayından hemen önce yap ya da ilgili yolları PLAN `scope:` içine al. Tamamlanmada `Status → Done` ve sprint checkbox'ı `[x]`.
 
 ## Wiki farkı
 
@@ -197,7 +156,7 @@ docs/project/tasks/TODO-001.md
 .agents/runs/TODO-001/
 ```
 
-"agent bu işi hangi contract ile yaptı?" sorusunu cevaplar.
+"agent bu işi şu an nasıl güvenli yürütüyor?" sorusunu cevaplar; geçicidir ve task bitince silinir.
 
 ```text
 docs/wiki/
@@ -207,13 +166,4 @@ docs/wiki/
 
 ## Execution role seçimi
 
-Markdown task source execution role'den bağımsızdır. Aynı
-`docs/project/tasks/TODO-001.md` için Claude-only ve Codex-only normal
-`full_lifecycle` kullanım geçerlidir. İstenirse Claude source/run'ı
-çözüp PLAN/FREEZE yapar, Codex'i açık `implementation_worker` olarak
-çağırır, sonra Claude VERIFY/REVIEW'e döner.
-
-Worker source task veya frozen PLAN'ı değiştirmez. PLAN dışı path ya da
-material karar gerektiğinde durur ve orchestrator'a blocker döndürür.
-Claude → Codex normal resume ise delegation değildir: normal Codex aynı
-repository run state'inden full lifecycle'a devam eder.
+Task kaynağı execution role'den bağımsızdır. Aynı task dosyasını Claude Code veya Codex normal `full_lifecycle` olarak baştan sona yürütebilir; `orchestrated` topology'de uygulama kodunu yalnız `implementation_worker` yazar. Worker task kaynağını veya frozen plan'ı değiştirmez; plan dışı bir yol ya da material karar gerektiğinde durur ve Orchestrator'a döner. Bu seçim repository config'ine bağlıdır, prompt'a yazılmaz.
