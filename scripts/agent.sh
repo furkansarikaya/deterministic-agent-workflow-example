@@ -290,6 +290,32 @@ set_task_source_revision() {
     *) fail "task source adapter unavailable: ${type:-missing}" ;;
   esac
 }
+# A task source kept in a lifecycle folder (backlog/, todo/, in-progress/, done/)
+# declares that state in its own `**Status:**` line. The value is bookkeeping (it is
+# excluded from the frozen contract), but the control plane refuses to proceed while
+# it contradicts the folder; `task-source-status` synchronizes it.
+lifecycle_folder_status() {
+  case "$(basename "$(dirname "$1")")" in
+    backlog) echo backlog ;; todo) echo todo ;; in-progress) echo in-progress ;; done) echo done ;;
+  esac
+}
+declared_task_status() { sed -n 's/^\*\*Status:\*\*[[:space:]]*//p' "$1" | head -1 | sed 's/[[:space:]]*$//'; }
+verify_task_source_status() {
+  id=$1; dir=$(run_dir "$id"); local_task_source_run "$id" || return 0
+  path=$(section_value "$dir" task_source path); want=$(lifecycle_folder_status "$path")
+  [ -n "$want" ] && [ -f "$root/$path" ] || return 0
+  have=$(declared_task_status "$root/$path"); [ -n "$have" ] || return 0
+  [ "$have" = "$want" ] || fail "task source status mismatch: $path is under $want/ but declares **Status:** $have; run '$0 task-source-status $id' (the Status value is bookkeeping and needs no re-baseline)"
+}
+# A change to the recorded task source that leaves its frozen contract byte-for-byte
+# intact (only the Status value or the completion-report block differ) is bookkeeping.
+task_source_bookkeeping_only() {
+  id=$1 path=$2; dir=$(run_dir "$id"); local_task_source_run "$id" || return 1
+  [ "$path" = "$(section_value "$dir" task_source path)" ] || return 1
+  revision=$(section_value "$dir" task_source revision); case "$revision" in ''|PENDING|not_applicable) return 1 ;; esac
+  [ -f "$root/$path" ] && [ ! -L "$root/$path" ] || return 1
+  [ "$revision" = "$(task_source_contract_hash "$id" "$root/$path")" ]
+}
 local_task_source() {
   dir=$1 path=$(section_value "$dir" task_source path)
   case "$path" in ''|/*|*'..'*|*'//'*) fail "invalid local Markdown task source path";; esac
@@ -311,6 +337,7 @@ verify_freshness() {
   case "$type:$revision" in
     local_markdown:*)
       source=$(local_task_source "$dir") || return 1
+      verify_task_source_status "$id"
       [ "$revision" = "$(task_source_contract_hash "$id" "$source")" ] || fail "stale plan: the frozen task contract changed (the Status value and the published completion-report block are bookkeeping and excluded; nothing else may change); amendment and refreeze required" ;;
     none:not_applicable) : ;;
     *) fail "task source revision unavailable or unsupported; amendment or adapter required" ;;
@@ -967,32 +994,41 @@ gate_pass_seq() {
 # A tree that already has a fail (or REOPEN) record against the current frozen
 # plan is an open finding: it cannot collect further gate records or advance
 # until a fix changes it.
+# A gate record binds the whole frozen contract (task, evidence, plan and QA plan
+# hashes), so an authorized amendment that changes any of them ends the previous
+# findings' hold on the tree and starts a fresh fix budget.
+gate_bound_to_contract() {
+  g_bd=$(run_dir "$1")
+  for g_bk in task evidence plan qa_plan; do
+    [ "$(gate_field "$2" "${g_bk}_sha256")" = "$(section_value "$g_bd" freeze "${g_bk}_sha256")" ] || return 1
+  done
+}
 open_finding_seq() {
-  g_id=$1 g_patch=$2 g_gd=$(gates_dir "$1"); g_plan=$(section_value "$(run_dir "$1")" freeze plan_sha256); g_hit=''
+  g_id=$1 g_patch=$2 g_gd=$(gates_dir "$1"); g_hit=''
   for g_n in $(gate_names "$g_id"); do
     g_f=$g_gd/$g_n
     [ "$(gate_field "$g_f" patch_sha256)" = "$g_patch" ] || continue
-    [ "$(gate_field "$g_f" plan_sha256)" = "$g_plan" ] || continue
+    gate_bound_to_contract "$g_id" "$g_f" || continue
     case "$(gate_field "$g_f" gate):$(gate_field "$g_f" result)" in REOPEN:*|REVIEW:fail|QA:fail|VERIFY:fail) g_hit=$(gate_field "$g_f" seq) ;; esac
   done
   printf '%s\n' "$g_hit"
 }
 fix_cycles_used() {
-  g_id=$1 g_gd=$(gates_dir "$1"); g_plan=$(section_value "$(run_dir "$1")" freeze plan_sha256); g_reopen=$(last_reopen_seq "$1"); g_c=0
+  g_id=$1 g_gd=$(gates_dir "$1"); g_reopen=$(last_reopen_seq "$1"); g_c=0
   for g_n in $(gate_names "$g_id"); do
     g_f=$g_gd/$g_n
     [ "$(gate_field "$g_f" result)" = fail ] || continue
-    [ "$(gate_field "$g_f" plan_sha256)" = "$g_plan" ] || continue
+    gate_bound_to_contract "$g_id" "$g_f" || continue
     [ "$(gate_field "$g_f" seq)" -gt "$g_reopen" ] || continue
     g_c=$((g_c + 1))
   done
   printf '%d\n' "$g_c"
 }
 latest_finding_file() {
-  g_id=$1 g_gd=$(gates_dir "$1"); g_plan=$(section_value "$(run_dir "$1")" freeze plan_sha256); g_hit=''
+  g_id=$1 g_gd=$(gates_dir "$1"); g_hit=''
   for g_n in $(gate_names "$g_id"); do
     g_f=$g_gd/$g_n
-    [ "$(gate_field "$g_f" plan_sha256)" = "$g_plan" ] || continue
+    gate_bound_to_contract "$g_id" "$g_f" || continue
     case "$(gate_field "$g_f" gate):$(gate_field "$g_f" result)" in REOPEN:*|REVIEW:fail|QA:fail|VERIFY:fail) g_hit=$g_f ;; esac
   done
   printf '%s\n' "$g_hit"
@@ -1009,7 +1045,7 @@ verify_fix_bound() {
   g_delta=$( { cat "${g_f%.yaml}.manifest"; patch_manifest "$g_id"; } | sed '/^$/d' | sort | uniq -u | cut -d '|' -f1 | sort -u )
   g_scope=$(gate_field "$g_f" fix_scope); g_bad=''
   for g_p in $g_delta; do
-    printf '%s\n' "$g_scope" | tr ',' '\n' | grep -Fxq "$g_p" || g_bad="$g_bad $g_p"
+    printf '%s\n' "$g_scope" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -Fxq -- "$g_p" || g_bad="$g_bad $g_p"
   done
   [ -z "$g_bad" ] || fail "fix changed paths outside the finding's fix_scope (${g_f##*/}):$g_bad"
 }
@@ -1346,6 +1382,30 @@ task_source_relocate() {
   echo "task source relocated: $id $old -> $new"
 }
 
+# Synchronize the task source's `**Status:**` line with its lifecycle folder. Only the
+# Status value changes: when a contract is frozen it must still hash to the recorded
+# revision afterwards, so this is never a way to edit the contract.
+task_source_status() {
+  id=$1; require_run "$id"; dir=$(run_dir "$id"); require_full_lifecycle; require_open_run "$id"
+  local_task_source_run "$id" || fail "task-source-status requires a local Markdown task source"
+  [ "$(section_value "$dir" completion_report published)" != true ] || fail "cannot change the task source status after the completion report is published: its receipt binds the task source"
+  enforce_task_branch "$id"; verify_seal "$id"
+  path=$(section_value "$dir" task_source path); source=$(local_task_source "$dir")
+  want=$(lifecycle_folder_status "$path")
+  [ -n "$want" ] || fail "task source $path is not under a lifecycle folder (backlog/, todo/, in-progress/ or done/): nothing to synchronize"
+  have=$(declared_task_status "$source"); [ -n "$have" ] || fail "task source $path has no **Status:** line"
+  [ "$have" != "$want" ] || { echo "task source status already $want: $id"; return 0; }
+  revision=$(section_value "$dir" task_source revision)
+  tmp=$(mktemp "${TMPDIR:-/tmp}/agent-task-status.XXXXXX")
+  awk -v s="$want" '/^\*\*Status:\*\*/ { print "**Status:** " s; next } { print }' "$source" > "$tmp"
+  case "$revision" in ''|PENDING|not_applicable) : ;; *)
+    [ "$revision" = "$(task_source_contract_hash "$id" "$tmp")" ] || { rm -f "$tmp"; fail "refusing to change the task source: the frozen task contract would change; amendment and refreeze required"; } ;;
+  esac
+  cat "$tmp" > "$source"; rm -f "$tmp"
+  if gates_enforced "$id"; then ledger_append "$id" task-source-status "$(section_value "$dir" handoff state)" "$(section_value "$dir" handoff state)" "$path: $have -> $want"; fi
+  echo "task source status synchronized: $id $path $have -> $want"
+}
+
 # Terminal outcome for a run that cannot complete. FAILED is only for a run whose bounded
 # fix budget is exhausted (fix_cycles_used > max) — the retry limit, never a judgment call;
 # BLOCKED is for a blocker outside the implementation (environment, tooling, an external
@@ -1443,6 +1503,7 @@ verify_scope() {
     printf '%s\n' "$paths" | while IFS= read -r changed; do
       [ -n "$changed" ] || continue
       known_control_artifact "$id" "$changed" && continue
+      task_source_bookkeeping_only "$id" "$changed" && continue
       if [ "$allow_knowledge" = 1 ] && in_knowledge_scope "$changed"; then continue; fi
       prior=$(baseline_fingerprint "$type" "$changed" "$dir"); current=$(fingerprint_path "$changed")
       if [ -n "$prior" ] && [ "$prior" = "$current" ]; then continue; fi
@@ -1498,6 +1559,7 @@ freeze() {
   [ "$(run_state "$dir")" != CODE_DONE ] || fail "cannot freeze completed run: $id"; [ "$(baseline_status "$dir")" = captured ] || fail "baseline required before freeze: $id"
   enforce_task_branch "$id"
   verify_seal "$id"
+  verify_task_source_status "$id"
   if freeze_hash_present "$dir"; then
     [ "${2:-}" = refreeze ] && [ -n "${3:-}" ] || fail "existing freeze requires explicit amendment"
     case "$3" in */*|*..*) fail "invalid amendment name: $3" ;; esac
@@ -2386,6 +2448,7 @@ case "$command" in
   window-close) require_full_lifecycle; window_close "${2:?usage: $0 window-close <TASK-ID> <BEFORE> [EXIT-STATUS]}" "${3:-}" "${4:-0}" ;;
   verify-gates) verify_lifecycle_gates "${2:?usage: $0 verify-gates <TASK-ID>}"; echo "lifecycle gates verified: $2" ;;
   verify-seal) verify_seal "${2:?usage: $0 verify-seal <TASK-ID>}"; echo "lifecycle seal verified: $2" ;;
+  task-source-status) task_source_status "${2:?usage: $0 task-source-status <TASK-ID>}" ;;
   task-source-relocate) task_source_relocate "${2:?usage: $0 task-source-relocate <TASK-ID> <NEW-PATH>}" "${3:?usage: $0 task-source-relocate <TASK-ID> <NEW-PATH>}" ;;
   knowledge-done) knowledge_done "${2:?usage: $0 knowledge-done <TASK-ID> [not_applicable]}" "${3:-KNOWLEDGE_DONE}" ;;
   publish-completion-report) publish_completion_report "${2:?usage: $0 publish-completion-report <TASK-ID> [ADAPTER]}" "${3:-markdown}" ;;
@@ -2393,5 +2456,5 @@ case "$command" in
   validate) validate_run "${2:?usage: $0 validate <TASK-ID>}" ;;
   test) require_full_lifecycle; fixture_test; sh "$root/scripts/lifecycle-test.sh"; branch_test; policy_test; standalone_test; worker_evidence_write_failure_test; knowledge_scope_test; delivery_check_knowledge_scope_test; validate_knowledge_scope_test; wiki_lint_self_scan_test ;;
   role-test) require_full_lifecycle; role_test ;;
-  *) echo "usage: $0 {role|status|effective|baseline|branch|classify|pipeline|freeze|refreeze|verify-freeze|verify-scope|verify-knowledge-scope|freshness|handoff|verify-handoff|delivery-check|worker-evidence|verify-worker-evidence|gate|amend|terminate|cleanup|patch-fingerprint|window-open|window-close|verify-gates|verify-seal|task-source-relocate|knowledge-done|publish-completion-report|verify-completion-report|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
+  *) echo "usage: $0 {role|status|effective|baseline|branch|classify|pipeline|freeze|refreeze|verify-freeze|verify-scope|verify-knowledge-scope|freshness|handoff|verify-handoff|delivery-check|worker-evidence|verify-worker-evidence|gate|amend|terminate|cleanup|patch-fingerprint|window-open|window-close|verify-gates|verify-seal|task-source-relocate|task-source-status|knowledge-done|publish-completion-report|verify-completion-report|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
 esac

@@ -768,8 +768,15 @@ scenario_task_contract_projection() {
   bad() { d=$1; shift; cp "$base/orig.md" "$f"; "$@"; if A freshness LC >/dev/null 2>&1; then echo "FAIL: contract change accepted: $d" >&2; exit 1; fi; }
   block() { printf '\n## Completion Report\n\n<!-- COMPLETION-REPORT:BEGIN:%s -->\nreport\n<!-- COMPLETION-REPORT:END:%s -->\n' "$1" "$1" >> "$f"; }
   A freshness LC >/dev/null
-  ok tc_status "$f" done
-  ok tc_status "$f" 'anything at all, even several words'
+  ok tc_status "$f" in-progress
+  # Whatever the Status value, it is never part of the contract: a value that disagrees with the
+  # lifecycle folder is refused as a status mismatch (not a contract change), and synchronizing it
+  # leaves the frozen contract untouched.
+  for v in done 'anything at all, even several words'; do
+    cp "$base/orig.md" "$f"; tc_status "$f" "$v"
+    tc_expect_msg "a Status value was read as contract" 'task-source-status' A freshness LC
+    A task-source-status LC >/dev/null; A freshness LC >/dev/null
+  done
   ok sh -c "printf '\n\n\n' >> '$f'"
   ok block LC
   bad "text after the END marker" sh -c "printf '\n## Completion Report\n\n<!-- COMPLETION-REPORT:BEGIN:LC -->\nr\n<!-- COMPLETION-REPORT:END:LC -->\n- extra requirement\n' >> '$f'"
@@ -784,6 +791,86 @@ scenario_task_contract_projection() {
   echo "lifecycle: task-source contract projection passed"
 }
 
+# A finding's fix_scope is a comma-separated list; entries written with spaces after the
+# commas are the same paths, and a path that is not listed is still refused.
+scenario_fix_scope_format() {
+  scaffold orchestrated false
+  worker RED fail impl_test.txt 'test: lookup returns the stored value'; worker GREEN pass impl.txt 'impl: lookup returns the stored value'
+  A handoff LC IMPLEMENTED >/dev/null
+  gate_fail full_lifecycle REVIEW 'impl.txt, impl_test.txt'; A handoff LC IMPLEMENTING >/dev/null
+  worker FIX pass impl_test.txt 'test: empty key returns the documented default'      # the second listed entry
+  A handoff LC IMPLEMENTED >/dev/null
+  gate_fail full_lifecycle QA impl.txt; A handoff LC IMPLEMENTING >/dev/null
+  worker FIX pass impl_test.txt 'test: a path that the finding did not list'
+  tc_expect_msg "a fix outside the listed fix_scope reached IMPLEMENTED" "outside the finding's fix_scope" A handoff LC IMPLEMENTED
+  echo "lifecycle: fix_scope entry format passed"
+}
+
+# An amendment that changes any frozen artifact (here only the QA plan) starts a fresh
+# fix budget, and the findings recorded against the previous contract stop holding the tree.
+scenario_amendment_fresh_budget() {
+  scaffold orchestrated false
+  worker RED fail impl_test.txt 'test: lookup returns the stored value'; worker GREEN pass impl.txt 'impl: lookup returns the stored value'
+  A handoff LC IMPLEMENTED >/dev/null
+  gate_fail full_lifecycle REVIEW impl.txt; A handoff LC IMPLEMENTING >/dev/null
+  mkdir -p .agents/runs/LC/amendments; printf '# amendment 001: the QA plan misstated a scenario\n' > .agents/runs/LC/amendments/001.md
+  printf -- '- QA-2 (AC-1): clarified scenario\n' >> .agents/runs/LC/QA_PLAN.md
+  A refreeze LC 001.md >/dev/null
+  expect_state handoff state IMPLEMENTING
+  A handoff LC IMPLEMENTED >/dev/null                                             # the evidence is still valid; the old finding no longer binds
+  gate_fail full_lifecycle QA impl.txt; A handoff LC IMPLEMENTING >/dev/null      # finding #1 of the new contract
+  worker FIX pass impl.txt 'impl: first attempt after the amendment'; A handoff LC IMPLEMENTED >/dev/null
+  gate_fail full_lifecycle VERIFY impl.txt; A handoff LC IMPLEMENTING >/dev/null  # finding #2: still inside the budget
+  worker FIX pass impl.txt 'impl: second attempt after the amendment'; A handoff LC IMPLEMENTED >/dev/null
+  gate_fail full_lifecycle REVIEW impl.txt                                        # finding #3: the fresh budget is spent
+  expect_fail "a third fix was allowed after the amendment" A handoff LC IMPLEMENTING
+  echo "lifecycle: amendment fresh fix budget passed"
+}
+
+# The task source's Status line must agree with its lifecycle folder; it is synchronized by
+# `task-source-status`, which changes only that line and is never a way to edit the contract.
+scenario_task_source_status() {
+  scaffold orchestrated true yes
+  frozen=$(rv task_source revision)
+  A freshness LC >/dev/null
+  tc_status tasks/in-progress/LC.md todo                                          # the file moved, the Status was left behind
+  tc_expect_msg "a stale Status passed freshness" 'task-source-status' A freshness LC
+  tc_expect_msg "a stale Status passed a handoff" 'task-source-status' A handoff LC IMPLEMENTING
+  tc_expect_msg "a stale Status passed a refreeze" 'task-source-status' A refreeze LC missing.md
+  expect_fail "the worker changed the task status" AS implementation_worker task-source-status LC
+  expect_fail "a reviewer changed the task status" AS independent_reviewer task-source-status LC
+  A task-source-status LC >/dev/null
+  grep -Fxq '**Status:** in-progress' tasks/in-progress/LC.md
+  expect_state task_source revision "$frozen"; A freshness LC >/dev/null; A verify-seal LC >/dev/null
+  A verify-scope LC >/dev/null                                                    # a Status-only change is bookkeeping, not scope drift
+  A task-source-status LC | grep -Fq 'already in-progress'
+  printf '%s\n' '- a requirement added after freeze' >> tasks/in-progress/LC.md    # the contract itself may not change through this command
+  tc_status tasks/in-progress/LC.md todo
+  tc_expect_msg "task-source-status absorbed a contract edit" 'frozen task contract would change' A task-source-status LC
+  tc_expect_msg "a contract edit hidden behind a stale Status passed" 'task-source-status' A freshness LC
+  grep -Fxq '**Status:** todo' tasks/in-progress/LC.md
+  echo "lifecycle: task source status synchronization passed"
+}
+
+# Moving the task to done/ needs the Status to follow before anything else proceeds; the
+# command is refused once the completion report is published, and a source outside the
+# lifecycle folders has nothing to synchronize.
+scenario_task_source_status_done() {
+  tc_scaffold_done orchestrated
+  mkdir -p tasks/done; git mv tasks/in-progress/LC.md tasks/done/LC.md           # moved, Status left as in-progress
+  A task-source-relocate LC tasks/done/LC.md >/dev/null
+  tc_expect_msg "a stale Status in done/ passed freshness" 'task-source-status' A freshness LC
+  tc_expect_msg "knowledge-done accepted a stale Status" 'task-source-status' A knowledge-done LC not_applicable
+  A task-source-status LC >/dev/null
+  grep -Fxq '**Status:** done' tasks/done/LC.md
+  finish_done; A delivery-check LC >/dev/null; A validate LC >/dev/null
+  tc_expect_msg "the status changed after the report was published" 'receipt binds' A task-source-status LC
+  scaffold orchestrated false                                                    # tasks/LC.md: not in a lifecycle folder
+  tc_expect_msg "a source outside the lifecycle folders was synchronized" 'not under a lifecycle folder' A task-source-status LC
+  A freshness LC >/dev/null
+  echo "lifecycle: task source status in done/ passed"
+}
+
 run_sc scenario_standalone claude
 run_sc scenario_standalone codex short
 run_sc scenario_independence
@@ -791,6 +878,8 @@ run_sc scenario_orchestrated_loop
 run_sc scenario_attribution
 run_sc scenario_worker_wrapper
 run_sc scenario_bounded_fix
+run_sc scenario_fix_scope_format
+run_sc scenario_amendment_fresh_budget
 run_sc scenario_terminal
 run_sc scenario_pipeline_trivial
 run_sc scenario_pipeline_standard
@@ -805,4 +894,6 @@ run_sc scenario_task_contract_laundering
 run_sc scenario_task_contract_relocate
 run_sc scenario_task_contract_adapter
 run_sc scenario_task_contract_projection
+run_sc scenario_task_source_status
+run_sc scenario_task_source_status_done
 echo 'agent lifecycle tests passed'
