@@ -54,7 +54,7 @@ The checked-in `.agents/ACTIVE_RUN` is empty: `./scripts/agent.sh status` report
 `agent.sh` resolves how implementation happens from `RUN.yaml`'s `execution.topology`, else `.agents/config.yaml`'s `default_topology` (this repository defaults to `standalone`; an invalid value on both fails closed):
 
 - **`standalone`** — the `full_lifecycle` agent implements RED/GREEN itself and records that evidence under its own role.
-- **`orchestrated`** — the orchestrator never implements application code; RED/GREEN/fixes belong to `implementation_worker`, invoked only through `scripts/worker-run.sh` (Codex, `codex exec`). A missing `codex` or a failed run is a hard failure, never a fallback. Model and reasoning effort come from the operator's Codex config unless `--model`/`--effort` is passed; declare `--network required` only when the task's evidence established it.
+- **`orchestrated`** — the orchestrator never implements application code; RED/GREEN/fixes belong to `implementation_worker`, invoked only through `scripts/worker-run.sh` (Codex, `codex exec`). A missing `codex` or a failed run is a hard failure, never a fallback. Model, reasoning effort and context budget come from the run's resolved execution decision (`execution_policy` in `.agents/config.yaml`, see WORKFLOW.md "Execution policy"); `--model`/`--effort` are explicit overrides that can be rejected; declare `--network required` only when the task's evidence established it.
 
 In both, `agent.sh handoff <TASK-ID> IMPLEMENTED` requires RED and GREEN evidence per scope path (or a validated `tdd_exemption`) from the role the topology expects.
 
@@ -81,7 +81,7 @@ In both, `agent.sh handoff <TASK-ID> IMPLEMENTED` requires RED and GREEN evidenc
 
 ## Adopt in another repository
 
-1. Copy and adapt `AGENTS.md`, `CLAUDE.md`, `.agents/`, `scripts/agent.sh`, `scripts/worker-run.sh`, `scripts/wiki-lint.sh`.
+1. Copy and adapt `AGENTS.md`, `CLAUDE.md`, `.agents/`, `scripts/agent.sh`, `scripts/worker-run.sh`, `scripts/exec-policy.sh`, `scripts/wiki-lint.sh` (and the test scripts).
 2. Adapt `scripts/verify.sh`, `.agents/ENGINEERING.md` and `.agents/VERIFICATION.md` to the real stack; set `default_topology` in `.agents/config.yaml`.
 3. Keep `ACTIVE_RUN` empty and `.agents/runs/` gitignored; start the first task with one sentence.
 4. Initialize `docs/wiki/` with the existing LLM Wiki skill; use `/wiki-ingest` only after CODE DONE, and only for durable knowledge.

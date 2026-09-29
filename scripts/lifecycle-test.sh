@@ -119,7 +119,7 @@ scaffold() {
   tpath=tasks/LC.md; [ "$layout" = yes ] && tpath=tasks/in-progress/LC.md
   n_fx=$((n_fx + 1)); fx=$base/fx$n_fx
   mkdir -p "$fx/.agents/runs/LC" "$fx/.agents/modes" "$fx/.agents/task-integrations" "$fx/scripts" "$fx/tasks"
-  cp "$root/scripts/agent.sh" "$root/scripts/worker-run.sh" "$fx/scripts/"; cp "$root/.agents/config.yaml" "$fx/.agents/"
+  cp "$root/scripts/agent.sh" "$root/scripts/worker-run.sh" "$root/scripts/exec-policy.sh" "$fx/scripts/"; cp "$root/.agents/config.yaml" "$root/.agents/ENGINEERING.md" "$root/.agents/VERIFICATION.md" "$fx/.agents/"
   cp "$root/.agents/task-integrations/markdown.sh" "$fx/.agents/task-integrations/"; chmod +x "$fx/.agents/task-integrations/markdown.sh"
   for m in "$root/.agents/modes/"*.yaml; do
     sed "s/independent: true/independent: $indep/; s/independent_verifier: true/independent_verifier: $indep/" "$m" > "$fx/.agents/modes/$(basename "$m")"
@@ -871,12 +871,70 @@ scenario_task_source_status_done() {
   echo "lifecycle: task source status in done/ passed"
 }
 
+# Execution policy end to end through the real wrappers with a stub `codex`:
+# scripts/worker-run.sh asks `agent.sh decide` for the attempt's one resolved decision
+# and translates exactly that into codex arguments; escalation, retry bound, override
+# rejection and the context budget all act before/around the (stub) model call.
+scenario_execution_policy() {
+  scaffold orchestrated false                                                     # COMPLEX: terra / high / 98304 bytes
+  mkdir -p "$base/bin"; rm -f "$base/args" "$base/stdin" "$base/ran"
+  cat > "$base/bin/codex" <<'STUB'
+#!/bin/sh
+: > "${FAKE_CODEX_MARK:-/dev/null}"
+printf '%s\n' "$*" >> "$FAKE_CODEX_ARGS"; cat > "$FAKE_CODEX_STDIN"
+exit "${FAKE_CODEX_EXIT:-0}"
+STUB
+  chmod +x "$base/bin/codex"; printf 'implement the bounded change\n' > "$base/prompt.txt"
+  wp() { ph=$1; shift; env FAKE_CODEX_ARGS="$base/args" FAKE_CODEX_STDIN="$base/stdin" FAKE_CODEX_MARK="$base/ran" ${EXTRA_ENV:-} PATH="$base/bin:$PATH" sh ./scripts/worker-run.sh LC "$ph" --network not-required --prompt-file "${PF:-$base/prompt.txt}" "$@"; }
+  wpx() { EXTRA_ENV=FAKE_CODEX_EXIT=3; wpx_rc=0; wp "$@" || wpx_rc=$?; EXTRA_ENV=; return "$wpx_rc"; }   # a worker that exits 3
+  wpf() { PF=$1; shift; wpf_rc=0; wp "$@" || wpf_rc=$?; PF=; return "$wpf_rc"; }                        # a different prompt file
+  last_args() { tail -1 "$base/args"; }
+  dec() { sed -n "s/^$2=//p" ".agents/runs/LC/decisions/$1.decision"; }
+  # first attempt: the decision, not ~/.codex/config.toml, picks model and effort
+  expect_fail "a failing worker was reported as success" wpx GREEN
+  case "$(last_args)" in *"--model gpt-5.6-terra"*"model_reasoning_effort=high"*) ;; *) echo "FAIL: codex did not receive the resolved model/effort: $(last_args)" >&2; exit 1 ;; esac
+  [ "$(dec 0-GREEN-1 outcome)" = failure ] && [ "$(dec 0-GREEN-1 exit_status)" = 3 ] && [ "$(dec 0-GREEN-1 attempt)" = 1 ]
+  head -1 "$base/stdin" | grep -q '^=== STABLE PREFIX'; grep -q '=== DYNAMIC' "$base/stdin"; grep -q 'implement the bounded change' "$base/stdin"
+  sed '/^=== DYNAMIC/,$d' "$base/stdin" > "$base/prefix1"
+  # a stated reasoning failure escalates effort, and the change is recorded with its reason
+  expect_fail "still failing" wpx GREEN --failure INSUFFICIENT_REASONING
+  case "$(last_args)" in *"model_reasoning_effort=xhigh"*) ;; *) echo "FAIL: escalation did not reach codex: $(last_args)" >&2; exit 1 ;; esac
+  [ "$(dec 0-GREEN-2 escalation)" = ESCALATED_REASONING ] && [ "$(dec 0-GREEN-2 attempt)" = 2 ] && [ "$(dec 0-GREEN-2 esc_events)" = 1 ]
+  sed '/^=== DYNAMIC/,$d' "$base/stdin" > "$base/prefix2"; cmp -s "$base/prefix1" "$base/prefix2"      # stable prefix byte-identical across attempts
+  expect_fail "still failing" wpx GREEN --failure INSUFFICIENT_REASONING
+  case "$(last_args)" in *"model_reasoning_effort=max"*) ;; *) echo "FAIL: second escalation: $(last_args)" >&2; exit 1 ;; esac
+  # the bound: 1 + max_bounded_fix_attempts attempts, then a refusal that never reaches codex
+  rm -f "$base/ran"; expect_fail "a fourth attempt ran" wp GREEN --failure INSUFFICIENT_REASONING
+  [ ! -e "$base/ran" ] || { echo "FAIL: codex ran past the retry limit" >&2; exit 1; }
+  ls .agents/runs/LC/decisions | grep -c '^0-GREEN-' | grep -qx 3
+  # overrides: hard-forbidden and unsupported values are refused before codex; a valid one wins
+  expect_fail "ultra effort was accepted" wp RED --effort ultra
+  expect_fail "an unknown model was accepted" wp RED --model no-such-model
+  [ ! -e "$base/ran" ] || { echo "FAIL: codex ran for a rejected override" >&2; exit 1; }
+  [ ! -e ".agents/runs/LC/decisions/0-RED-1.decision" ] || { echo "FAIL: a rejected override left a decision" >&2; exit 1; }
+  wp RED --model gpt-5.6-sol --effort low >/dev/null
+  case "$(last_args)" in *"--model gpt-5.6-sol"*"model_reasoning_effort=low"*) ;; *) echo "FAIL: override did not reach codex: $(last_args)" >&2; exit 1 ;; esac
+  [ "$(dec 0-RED-1 overrides)" = model,effort ]
+  # the context budget: the task prompt is never silently truncated; a failure log is tail-truncated
+  head -c 100000 /dev/zero | tr '\0' 'x' > "$base/big.txt"; rm -f "$base/ran"
+  expect_fail "an over-budget prompt was sent" wpf "$base/big.txt" REFACTOR
+  [ ! -e "$base/ran" ] && [ "$(dec 0-REFACTOR-1 aborted)" = context_budget ]
+  head -c 300000 /dev/zero | tr '\0' 'y' > "$base/log.txt"
+  wpf "$base/big.txt" REFACTOR --failure CONTEXT_MISSING --failure-file "$base/log.txt" >/dev/null
+  [ "$(dec 0-REFACTOR-2 context_bytes)" = 196608 ] && [ "$(dec 0-REFACTOR-2 context_truncated)" = failure_log ]
+  [ "$(wc -c < "$base/stdin")" -le $((196608 + $(wc -c < "$base/prefix1") + 200)) ]
+  # the decision is control metadata: the run still validates
+  if v=$(A validate LC 2>&1); then :; else case "$v" in *"unexpected run artifact"*) echo "FAIL: decisions/ is not a known control artifact: $v" >&2; exit 1 ;; esac; fi
+  echo "lifecycle: execution policy end to end passed"
+}
+
 run_sc scenario_standalone claude
 run_sc scenario_standalone codex short
 run_sc scenario_independence
 run_sc scenario_orchestrated_loop
 run_sc scenario_attribution
 run_sc scenario_worker_wrapper
+run_sc scenario_execution_policy
 run_sc scenario_bounded_fix
 run_sc scenario_fix_scope_format
 run_sc scenario_amendment_fresh_budget

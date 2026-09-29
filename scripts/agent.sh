@@ -232,6 +232,57 @@ classify() {
   echo "classified: $id $class (gates: $(pipeline_gates "$id" | tr '\n' ' '))"
 }
 
+# ---------------------------------------------------------------------------
+# Execution policy. `decide` is the only caller of scripts/exec-policy.sh (the one
+# resolver) and persists exactly one decision per attempt under the run's
+# decisions/ directory; scripts/worker-run.sh consumes that decision and re-decides
+# nothing. The resolver is pure: the class comes from this run's classification,
+# the retry bound is verification.max_bounded_fix_attempts (the one retry system),
+# and scope evidence is the frozen PLAN.md's paths. See .agents/WORKFLOW.md
+# "Execution policy".
+# ---------------------------------------------------------------------------
+decision_field() { sed -n "s/^$2=//p" "$1" | head -1; }
+# The newest decision for a phase within the current amendment epoch (an amendment
+# starts a fresh fix budget, so it starts fresh attempt counting too).
+latest_decision() { # ID PHASE
+  ld_dir=$(run_dir "$1")/decisions; ld_epoch=$(ls -1 "$(run_dir "$1")/amendments" 2>/dev/null | wc -l | tr -d ' ')
+  ls -1 "$ld_dir" 2>/dev/null | grep -E "^$ld_epoch-$2-[0-9]+\.decision\$" | sort -t- -k3,3n | tail -1 | sed "s#^#$ld_dir/#"
+}
+decide() { # ID PHASE [--failure CODE] [--model M] [--effort E] [--delegation N] [--context-bytes B]
+  id=$1 phase=$2; shift 2; require_run "$id"; require_open_run "$id"; dir=$(run_dir "$id")
+  case "$phase" in RED|GREEN|REFACTOR|FIX) ;; *) fail "invalid phase: $phase (want RED|GREEN|REFACTOR|FIX)" ;; esac
+  class=$(pipeline_class "$id"); pipeline_class_valid "$class" || fail "run $id is not classified: the execution policy is derived from its task class"
+  topo=$(resolve_topology "$dir"); has_failure=no
+  for d_arg in "$@"; do [ "$d_arg" = --failure ] && has_failure=yes; done
+  d_last=$(latest_decision "$id" "$phase"); attempt=1; prev='0 0 0 0'; d_seq=1
+  if [ -n "$d_last" ]; then
+    d_seq=$(( $(basename "$d_last" .decision | awk -F- '{print $3}') + 1 ))
+    if [ "$(decision_field "$d_last" outcome)" != success ]; then
+      attempt=$(( $(decision_field "$d_last" attempt) + 1 ))
+      prev="$(decision_field "$d_last" esc_model) $(decision_field "$d_last" esc_effort) $(decision_field "$d_last" esc_context) $(decision_field "$d_last" esc_events)"
+      # A re-run with no stated failure is a same-capability retry, recorded as such.
+      [ "$has_failure" = yes ] || set -- "$@" --failure TRANSIENT
+    fi
+  fi
+  d_epoch=$(ls -1 "$dir/amendments" 2>/dev/null | wc -l | tr -d ' '); mkdir -p "$dir/decisions"
+  d_out="$dir/decisions/$d_epoch-$phase-$d_seq.decision"; d_tmp="$d_out.tmp"
+  { [ -f "$dir/PLAN.md" ] && scope_mappings "$dir/PLAN.md" | cut -d '|' -f1 || true; } | \
+    "$root/scripts/exec-policy.sh" resolve --class "$class" --topology "$topo" --review "$(pipeline_review "$id")" \
+      --attempt "$attempt" --retry-limit "$(max_fix_attempts "$id")" --prev "$prev" "$@" > "$d_tmp" || { d_rc=$?; rm -f "$d_tmp"; return "$d_rc"; }
+  printf 'phase=%s\nseq=%s\n' "$phase" "$d_seq" >> "$d_tmp"; mv "$d_tmp" "$d_out"
+  cat "$d_out"; echo "decision_file=${d_out#$root/}"
+}
+# Minimal local execution evidence appended to a decision after the attempt:
+# outcome, and any measured k=v (exit_status, duration_s, context_bytes_used, ...).
+decision_outcome() { # ID PHASE success|failure [k=v ...]
+  id=$1 phase=$2 outcome=$3; shift 3; require_run "$id"
+  case "$outcome" in success|failure) ;; *) fail "outcome must be success|failure" ;; esac
+  d_last=$(latest_decision "$id" "$phase"); [ -n "$d_last" ] || fail "no decision recorded for $id $phase"
+  [ -z "$(decision_field "$d_last" outcome)" ] || fail "outcome already recorded for ${d_last#$root/}"
+  printf 'outcome=%s\n' "$outcome" >> "$d_last"
+  for d_kv in "$@"; do case "$d_kv" in [a-z_]*=*) printf '%s\n' "$d_kv" >> "$d_last" ;; *) fail "bad metric: $d_kv" ;; esac; done
+}
+
 # Freezes exactly the artifacts the run's pipeline requires; an artifact the pipeline does
 # not require is recorded as `not_required`, never hashed.
 replace_hashes() {
@@ -566,7 +617,7 @@ validate_run() {
 known_control_artifact() {
   id=$1 path=$2
   case "$path" in
-    ".agents/runs/$id/TASK.md"|".agents/runs/$id/PLAN.md"|".agents/runs/$id/RUN.yaml"|".agents/runs/$id/COMPLETION_REPORT.md"|".agents/runs/$id/amendments/"*|".agents/runs/$id/worker-evidence/"*|".agents/runs/$id/gates/"*|".agents/runs/$id/LEDGER.log") return 0 ;;
+    ".agents/runs/$id/TASK.md"|".agents/runs/$id/PLAN.md"|".agents/runs/$id/RUN.yaml"|".agents/runs/$id/COMPLETION_REPORT.md"|".agents/runs/$id/amendments/"*|".agents/runs/$id/worker-evidence/"*|".agents/runs/$id/decisions/"*|".agents/runs/$id/gates/"*|".agents/runs/$id/LEDGER.log") return 0 ;;
     ".agents/runs/$id/EVIDENCE.md") [ "$(pipeline_needs "$id" evidence)" = yes ] && return 0 ;;
     ".agents/runs/$id/QA_PLAN.md") [ "$(pipeline_needs "$id" qa)" = yes ] && return 0 ;;
     ".agents/runs/$id/REVIEW.md"|".agents/runs/$id/QA_REPORT.md"|".agents/runs/$id/VERIFY.md")
@@ -2226,7 +2277,7 @@ wiki_lint_self_scan_test() {
 standalone_test() {
   tmp=$(mktemp -d /tmp/deterministic-standalone.XXXXXX); trap 'rm -rf "$tmp"' EXIT
   mkdir -p "$tmp/.agents/runs/STANDALONE/review" "$tmp/.agents/modes" "$tmp/.agents/task-integrations" "$tmp/scripts" "$tmp/tasks"
-  cp "$root/scripts/agent.sh" "$root/scripts/worker-run.sh" "$tmp/scripts/"; chmod +x "$tmp/scripts/worker-run.sh"
+  cp "$root/scripts/agent.sh" "$root/scripts/worker-run.sh" "$root/scripts/exec-policy.sh" "$tmp/scripts/"; chmod +x "$tmp/scripts/worker-run.sh" "$tmp/scripts/exec-policy.sh"
   cp "$root/.agents/config.yaml" "$tmp/.agents/"; cp "$root/.agents/modes/"*.yaml "$tmp/.agents/modes/"
   cp "$root/.agents/task-integrations/markdown.sh" "$tmp/.agents/task-integrations/"; chmod +x "$tmp/.agents/task-integrations/markdown.sh"
   printf 'STANDALONE\n' > "$tmp/.agents/ACTIVE_RUN"
@@ -2428,6 +2479,8 @@ case "$command" in
   branch) require_full_lifecycle; branch_setup "${2:?usage: $0 branch <TASK-ID>}" ;;
   classify) require_full_lifecycle; classify "${2:?usage: $0 classify <TASK-ID> <TRIVIAL|STANDARD|COMPLEX|CRITICAL> [review]}" "${3:?usage: $0 classify <TASK-ID> <TRIVIAL|STANDARD|COMPLEX|CRITICAL> [review]}" "${4:-}" ;;
   pipeline) pipeline_show "${2:?usage: $0 pipeline <TASK-ID>}" ;;
+  decide) require_full_lifecycle; id=${2:?usage: $0 decide <TASK-ID> <RED|GREEN|REFACTOR|FIX> [--failure CODE] [--model M] [--effort E] [--delegation N] [--context-bytes B]}; ph=${3:?usage: $0 decide <TASK-ID> <PHASE> ...}; shift 3; decide "$id" "$ph" "$@" ;;
+  decision-outcome) require_full_lifecycle; id=${2:?usage: $0 decision-outcome <TASK-ID> <PHASE> <success|failure> [k=v ...]}; ph=${3:?}; oc=${4:?}; shift 4; decision_outcome "$id" "$ph" "$oc" "$@" ;;
   freeze) require_full_lifecycle; freeze "${2:?usage: $0 freeze <TASK-ID>}" ;;
   refreeze) require_full_lifecycle; freeze "${2:?usage: $0 refreeze <TASK-ID> <AMENDMENT>}" refreeze "${3:?usage: $0 refreeze <TASK-ID> <AMENDMENT>}" ;;
   verify-freeze) verify_freeze "${2:?usage: $0 verify-freeze <TASK-ID>}" ;;
@@ -2454,7 +2507,7 @@ case "$command" in
   publish-completion-report) publish_completion_report "${2:?usage: $0 publish-completion-report <TASK-ID> [ADAPTER]}" "${3:-markdown}" ;;
   verify-completion-report) verify_completion_report "${2:?usage: $0 verify-completion-report <TASK-ID>}" ;;
   validate) validate_run "${2:?usage: $0 validate <TASK-ID>}" ;;
-  test) require_full_lifecycle; fixture_test; sh "$root/scripts/lifecycle-test.sh"; branch_test; policy_test; standalone_test; worker_evidence_write_failure_test; knowledge_scope_test; delivery_check_knowledge_scope_test; validate_knowledge_scope_test; wiki_lint_self_scan_test ;;
+  test) require_full_lifecycle; fixture_test; sh "$root/scripts/exec-policy-test.sh"; sh "$root/scripts/lifecycle-test.sh"; branch_test; policy_test; standalone_test; worker_evidence_write_failure_test; knowledge_scope_test; delivery_check_knowledge_scope_test; validate_knowledge_scope_test; wiki_lint_self_scan_test ;;
   role-test) require_full_lifecycle; role_test ;;
   *) echo "usage: $0 {role|status|effective|baseline|branch|classify|pipeline|freeze|refreeze|verify-freeze|verify-scope|verify-knowledge-scope|freshness|handoff|verify-handoff|delivery-check|worker-evidence|verify-worker-evidence|gate|amend|terminate|cleanup|patch-fingerprint|window-open|window-close|verify-gates|verify-seal|task-source-relocate|task-source-status|knowledge-done|publish-completion-report|verify-completion-report|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
 esac

@@ -14,24 +14,28 @@
 # full_lifecycle orchestrator) must not treat that as license to implement
 # the change directly.
 #
-# Model/reasoning-effort selection is deliberately NOT pinned here: unless
-# --model/--effort is explicitly passed, `codex exec` resolves both from the
-# user's own ~/.codex/config.toml, exactly as it already does for an
-# interactive invocation. Pinning a specific model into version control
-# would silently diverge from whatever the operator's Codex install is
-# actually configured to run.
+# Model, reasoning effort and context budget are NOT chosen here and are not read
+# from the operator's ~/.codex/config.toml either: this script asks `agent.sh
+# decide` (the one execution-policy resolver, .agents/config.yaml `execution_policy`)
+# for the attempt's single resolved decision and only translates it into `codex exec`
+# arguments. --model/--effort/--delegation/--context-bytes are explicit operator
+# overrides handed to that resolver (which may reject them); --failure/--failure-file
+# describe the previous failed attempt for bounded escalation. See .agents/WORKFLOW.md
+# "Execution policy".
 set -eu
 root=$(CDPATH= cd "$(dirname "$0")/.." && pwd)
-usage() { echo "usage: $0 <TASK-ID> <PHASE> --network <required|not-required> --prompt-file <path> [--model <name>] [--effort <level>]" >&2; exit 2; }
+usage() { echo "usage: $0 <TASK-ID> <PHASE> --network <required|not-required> --prompt-file <path> [--failure <CODE> [--failure-file <path>]] [--model <name>] [--effort <level>] [--delegation <n>] [--context-bytes <n>]" >&2; exit 2; }
 
 task_id=${1:?}; phase=${2:?}; shift 2
-network='' prompt_file='' model='' effort=''
+network='' prompt_file='' failure_file='' dargs=''
+# Values are single tokens (model ids, levels, codes, integers); anything else is refused.
+tok() { case "$2" in ''|*[[:space:]]*|-*|*[*?[]*) echo "worker-run: invalid value for $1: '$2'" >&2; exit 2 ;; esac; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --network) network=${2:?}; shift 2 ;;
     --prompt-file) prompt_file=${2:?}; shift 2 ;;
-    --model) model=${2:?}; shift 2 ;;
-    --effort) effort=${2:?}; shift 2 ;;
+    --failure-file) failure_file=${2:?}; shift 2 ;;
+    --failure|--model|--effort|--delegation|--context-bytes) tok "$1" "${2:-}"; dargs="$dargs $1 $2"; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -65,6 +69,40 @@ command -v codex >/dev/null 2>&1 || { echo "worker-run: codex CLI not found on P
 state=$(sed -n '/^handoff:$/,/^[^ ]/p' "$dir/RUN.yaml" | sed -n 's/^[[:space:]]*state: *//p' | head -1 | tr -d '"')
 [ "$state" = IMPLEMENTING ] || { echo "worker-run: run $task_id is not in IMPLEMENTING (state: $state); establish that handoff first" >&2; exit 1; }
 
+# The attempt's one resolved execution decision (or a clear refusal: rejected override,
+# exhausted retry/escalation limit). Nothing below re-decides model, effort or context.
+decision=$("$root/scripts/agent.sh" decide "$task_id" "$phase" $dargs) || { echo "worker-run: no execution decision for $task_id $phase; codex not invoked" >&2; exit 1; }
+dfield() { printf '%s\n' "$decision" | sed -n "s/^$1=//p" | head -1; }
+model=$(dfield model); effort=$(dfield effort); budget=$(dfield context_bytes)
+[ "$(dfield provider)" = codex ] && [ -n "$model" ] && [ -n "$effort" ] || { echo "worker-run: the decision does not select a codex model/effort" >&2; exit 1; }
+abort_attempt() { "$root/scripts/agent.sh" decision-outcome "$task_id" "$phase" failure "aborted=$1" >/dev/null 2>&1 || true; echo "worker-run: $2; codex not invoked" >&2; exit 1; }
+
+# Bounded context: a stable, run-independent prefix (identical bytes across attempts and
+# tasks, the only thing a provider-side prefix cache could reuse) followed by this
+# attempt's dynamic suffix. The task prompt is the task contract and is never truncated:
+# over budget is a hard refusal. A failure log is volatile: tail-truncated to what is left.
+prompt_bytes=$(wc -c < "$prompt_file" | tr -d ' ')
+[ "$prompt_bytes" -le "$budget" ] || abort_attempt context_budget "prompt file is $prompt_bytes bytes but this attempt's resolved context budget is $budget (trim the prompt; the task contract is not silently truncated)"
+assembled=$(mktemp "${TMPDIR:-/tmp}/worker-prompt.XXXXXX"); trap 'rm -f "$assembled"' EXIT
+stable_files=$(sed -n '/^execution_policy:$/,/^[^ ]/p' "$root/.agents/config.yaml" | sed -n 's/^    stable: *//p' | head -1)
+{ printf '=== STABLE PREFIX (run-independent) ===\n'
+  for f in $stable_files; do [ -f "$root/$f" ] || abort_attempt stable_prefix "stable context file missing: $f"; printf '\n--- %s ---\n' "$f"; cat "$root/$f"; done
+} > "$assembled"
+stable_bytes=$(wc -c < "$assembled" | tr -d ' ')
+{ printf '\n=== DYNAMIC (this attempt) ===\n'; cat "$prompt_file"; } >> "$assembled"
+included="task" excluded='' truncated=''
+if [ -n "$failure_file" ]; then
+  [ -f "$failure_file" ] || abort_attempt failure_file "no such failure file: $failure_file"
+  left=$((budget - prompt_bytes))
+  if [ "$left" -le 0 ]; then excluded="failure_log"
+  else
+    included="$included,failure_log"
+    printf '\n=== PREVIOUS FAILURE (tail) ===\n' >> "$assembled"; tail -c "$left" "$failure_file" >> "$assembled"
+    [ "$(wc -c < "$failure_file" | tr -d ' ')" -le "$left" ] || truncated="failure_log"
+  fi
+fi
+started=$(date +%s)
+
 sandbox=workspace-write
 net_flag=false
 [ "$network" = required ] && net_flag=true
@@ -89,9 +127,7 @@ log_file="$log_dir/$phase-invocation-$seq.log"
 # `.agents/**` as a whole. It never widens to TASK.md/EVIDENCE.md/PLAN.md/
 # RUN.yaml or any other run's directory: `implementation_worker` still
 # cannot write those, sandboxed or not.
-set -- exec --sandbox "$sandbox" --add-dir "$log_dir"
-[ -n "$model" ] && set -- "$@" --model "$model"
-[ -n "$effort" ] && set -- "$@" --config "model_reasoning_effort=$effort"
+set -- exec --sandbox "$sandbox" --add-dir "$log_dir" --model "$model" --config "model_reasoning_effort=$effort"
 set -- "$@" --config "sandbox_workspace_write.network_access=$net_flag"
 
 # Bracket the worker run with tree attestation. For a run with the
@@ -105,9 +141,12 @@ set -- "$@" --config "sandbox_workspace_write.network_access=$net_flag"
 # use that policy (see agent.sh's verify_mutation_ownership).
 tree_before=$("$root/scripts/agent.sh" window-open "$task_id") || { echo "worker-run: refusing to start a worker window: the application/test tree is not the last attested state (see the message above); undo the unattributed change first" >&2; exit 1; }
 
-echo "worker-run: invoking codex $* (AGENT_ROLE=implementation_worker, network=$network)" | tee "$log_file"
+echo "worker-run: decision policy_version=$(dfield policy_version) attempt=$(dfield attempt) model=$model ($(dfield model_reason)) effort=$effort ($(dfield effort_reason)) context_bytes=$budget escalation=$(dfield escalation)" | tee "$log_file"
+echo "worker-run: invoking codex $* (AGENT_ROLE=implementation_worker, network=$network)" | tee -a "$log_file"
 status=0
-AGENT_ROLE=implementation_worker CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" codex "$@" < "$prompt_file" >> "$log_file" 2>&1 || status=$?
+AGENT_ROLE=implementation_worker CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" codex "$@" < "$assembled" >> "$log_file" 2>&1 || status=$?
+outcome=success; [ "$status" -eq 0 ] || outcome=failure
+"$root/scripts/agent.sh" decision-outcome "$task_id" "$phase" "$outcome" "exit_status=$status" "duration_s=$(( $(date +%s) - started ))" "stable_prefix_bytes=$stable_bytes" "dynamic_bytes=$prompt_bytes" "context_included=$included" "context_excluded=${excluded:-none}" "context_truncated=${truncated:-none}" >> "$log_file" 2>&1 || true
 "$root/scripts/agent.sh" window-close "$task_id" "$tree_before" "$status" >> "$log_file" 2>&1 || { echo "worker-run: could not record the worker window (unattributed mutation?); log: ${log_file#$root/}" >&2; exit 1; }
 if [ "$status" -eq 0 ]; then
   echo "worker-run: codex exec completed (exit 0); log: ${log_file#$root/}"
