@@ -23,4 +23,4 @@ Why this amendment is necessary and who authorized scope expansion.
 
 ## Re-freeze
 
-Record new hashes and current planning freshness in `RUN.yaml`. Do not overwrite prior frozen artifacts; retain this amendment as the audit trail. Every required gate (REVIEW/QA/VERIFY) runs again on the new tree; a refreeze from IMPLEMENTED voids them and starts a fresh fix budget.
+Record new hashes and current planning freshness in `RUN.yaml`. Do not overwrite prior frozen artifacts. Retain this amendment as the audit trail. Gate and fix-budget effects: `.agents/WORKFLOW.md` "Freezes".

@@ -64,14 +64,26 @@ In both, `agent.sh handoff <TASK-ID> IMPLEMENTED` requires RED and GREEN evidenc
 
 ## Try the included example
 
+The control plane needs only the minimum platform in [.agents/ENGINEERING.md](.agents/ENGINEERING.md): POSIX `sh`, `git`, `awk`, `sed` and `shasum`. Go is needed only to build the example application.
+
 ```sh
-./scripts/verify.sh            # go build, test, vet
-./scripts/agent.sh test        # control-plane self-tests: fixture, lifecycle, branch, policy, standalone, knowledge, wiki (several minutes)
+./scripts/verify.sh            # the example application: go build, test, vet
+./scripts/agent.sh test        # control-plane self-tests: fixture, lifecycle, branch, policy, standalone, knowledge, wiki, oversight (several minutes)
 ./scripts/agent.sh status
 ./scripts/wiki-lint.sh
 ```
 
 `src/` and `tests/` are a small task-registry example that gives the workflow realistic repository context. This repository carries no demonstration run; `agent.sh test` exercises the workflow in throwaway repositories.
+
+## Human oversight
+
+Run state is canonical. `summary` and `report` project it for humans; they are not evidence and never change a run. They are sh and awk, with nothing to build. Full contract, including the optional `workflow-event/1` observer emission and its privacy boundary: [.agents/OVERSIGHT.md](.agents/OVERSIGHT.md).
+
+```sh
+./scripts/agent.sh summary [TASK-ID]                 # concise text
+./scripts/agent.sh report [TASK-ID] [--out FILE]     # self-contained HTML in .agents/runtime/reports/ (git-ignored)
+./scripts/agent.sh oversight-model [TASK-ID]         # the model as JSON
+```
 
 ## Guides
 
@@ -81,7 +93,7 @@ In both, `agent.sh handoff <TASK-ID> IMPLEMENTED` requires RED and GREEN evidenc
 
 ## Adopt in another repository
 
-1. Copy and adapt `AGENTS.md`, `CLAUDE.md`, `.agents/`, `scripts/agent.sh`, `scripts/worker-run.sh`, `scripts/exec-policy.sh`, `scripts/wiki-lint.sh` (and the test scripts).
+1. Copy and adapt `AGENTS.md`, `CLAUDE.md`, `.agents/`, `scripts/agent.sh`, `scripts/worker-run.sh`, `scripts/exec-policy.sh`, `scripts/wiki-lint.sh`, the `scripts/oversight/` directory (sh and awk, no build step) and the test scripts (`lifecycle-test.sh`, `exec-policy-test.sh`, `oversight-test.sh`, `oversight-model-test.sh`, `oversight-fixture.sh`). Add `.agents/runtime/` to `.gitignore`.
 2. Adapt `scripts/verify.sh`, `.agents/ENGINEERING.md` and `.agents/VERIFICATION.md` to the real stack; set `default_topology` in `.agents/config.yaml`.
 3. Keep `ACTIVE_RUN` empty and `.agents/runs/` gitignored; start the first task with one sentence.
 4. Initialize `docs/wiki/` with the existing LLM Wiki skill; use `/wiki-ingest` only after CODE DONE, and only for durable knowledge.

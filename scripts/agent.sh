@@ -13,6 +13,47 @@ require_full_lifecycle() { [ "$execution_role" = full_lifecycle ] || fail "comma
 
 valid_task_id() { case "$1" in *[!A-Za-z0-9_-]*|'') return 1;; esac; }
 
+# --- Oversight (read-only projection) and workflow events (observer-only) ----
+# Both are presentation, never truth: they read run state, write only under the
+# ignored .agents/runtime/, and a failure in either never fails a lifecycle command.
+# Both are sh + awk (scripts/oversight/); neither needs any language toolchain.
+# See .agents/OVERSIGHT.md.
+# workflow_event <ID> --event E --stage S --status T [--gate G --attempt N --loop N --findings-open N --fingerprint H --role R]
+# The role on an event is the role that emitted it: the invoking AGENT_ROLE. A call site must not pass --role to
+# claim another role (for example the expected implementation owner), because that role may never have acted.
+# No-op unless AGENT_WORKFLOW_EVENTS_URL is set. Always returns 0.
+workflow_event() {
+  [ -n "${AGENT_WORKFLOW_EVENTS_URL:-}" ] || return 0
+  we_id=$1; shift
+  we_topo=$(resolve_topology "$(run_dir "$we_id")" 2>/dev/null) || we_topo=''
+  sh "$root/scripts/oversight/event.sh" --root "$root" --task "$we_id" --role "$execution_role" --topology "$we_topo" "$@" >/dev/null 2>&1 || true
+  return 0
+}
+# Event status words, as plain functions (no `case` inside `$( )`: bash 3.2 mis-parses that).
+ev_result() { if [ "$1" = pass ] || [ "$1" = success ]; then echo passed; else echo failed; fi; }
+oversight_task() { # [ID] -> the task to project (the active run when omitted)
+  ot=${1:-}; [ -n "$ot" ] || ot=$(active_run) || return 1
+  [ -n "$ot" ] || fail "no active task: pass a TASK-ID"
+  require_run "$ot"; printf '%s\n' "$ot"
+}
+oversight_run() { # summary|report|model [ID] [--out FILE]
+  or_cmd=$1; shift; or_id=''; or_out=''
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --out) [ -n "${2:-}" ] || fail "usage: $0 $or_cmd [TASK-ID] [--out FILE]"; or_out=$2; shift 2 ;;
+      -*) fail "unknown option: $1" ;;
+      *) [ -z "$or_id" ] || fail "usage: $0 $or_cmd [TASK-ID] [--out FILE]"; or_id=$1; shift ;;
+    esac
+  done
+  [ "$or_cmd" = report ] || [ -z "$or_out" ] || fail "--out applies to report only"
+  # --out chooses where a file is written, so only full_lifecycle may use it. Every other role (the read-only
+  # observers, planners and the implementation worker) writes only the default path under the ignored
+  # .agents/runtime/reports/. oversight.sh additionally refuses run state, symlinks and tracked files for everyone.
+  [ -z "$or_out" ] || [ "$execution_role" = full_lifecycle ] || fail "--out is only available to full_lifecycle (role: $execution_role); the default report path is .agents/runtime/reports/<TASK-ID>.html"
+  or_id=$(oversight_task "$or_id") || return 1
+  if [ -n "$or_out" ]; then sh "$root/scripts/oversight/oversight.sh" "$or_cmd" --root "$root" --task "$or_id" --out "$or_out"; else sh "$root/scripts/oversight/oversight.sh" "$or_cmd" --root "$root" --task "$or_id"; fi
+}
+
 # Empty is the intentional checked-in template state. Missing or malformed is not.
 active_run() {
   marker=$root/$(config_value active_run_file "$config")
@@ -229,6 +270,7 @@ classify() {
   esac
   set_run_value "$id" pipeline classification "$class"; set_run_value "$id" pipeline review "$review"
   ledger_append "$id" classify "$(section_value "$dir" handoff state)" "$(section_value "$dir" handoff state)" "$class review=$review"
+  workflow_event "$id" --event stage --stage discover --status started
   echo "classified: $id $class (gates: $(pipeline_gates "$id" | tr '\n' ' '))"
 }
 
@@ -270,6 +312,7 @@ decide() { # ID PHASE [--failure CODE] [--model M] [--effort E] [--delegation N]
     "$root/scripts/exec-policy.sh" resolve --class "$class" --topology "$topo" --review "$(pipeline_review "$id")" \
       --attempt "$attempt" --retry-limit "$(max_fix_attempts "$id")" --prev "$prev" "$@" > "$d_tmp" || { d_rc=$?; rm -f "$d_tmp"; return "$d_rc"; }
   printf 'phase=%s\nseq=%s\n' "$phase" "$d_seq" >> "$d_tmp"; mv "$d_tmp" "$d_out"
+  workflow_event "$id" --event attempt --stage implement --status started --attempt "$attempt"
   cat "$d_out"; echo "decision_file=${d_out#$root/}"
 }
 # Minimal local execution evidence appended to a decision after the attempt:
@@ -281,6 +324,7 @@ decision_outcome() { # ID PHASE success|failure [k=v ...]
   [ -z "$(decision_field "$d_last" outcome)" ] || fail "outcome already recorded for ${d_last#$root/}"
   printf 'outcome=%s\n' "$outcome" >> "$d_last"
   for d_kv in "$@"; do case "$d_kv" in [a-z_]*=*) printf '%s\n' "$d_kv" >> "$d_last" ;; *) fail "bad metric: $d_kv" ;; esac; done
+  workflow_event "$id" --event attempt --stage implement --status "$(ev_result "$outcome")" --attempt "$(decision_field "$d_last" attempt)"
 }
 
 # Freezes exactly the artifacts the run's pipeline requires; an artifact the pipeline does
@@ -531,6 +575,12 @@ record_handoff() {
   tmp=$dir/RUN.yaml.tmp; replace_section_value "$dir" handoff state "$phase" "$tmp" && mv "$tmp" "$dir/RUN.yaml"
   if [ "$phase" = CODE_DONE ]; then replace_section_value "$dir" execution state CODE_DONE "$dir/RUN.yaml.tmp" && mv "$dir/RUN.yaml.tmp" "$dir/RUN.yaml"; fi
   if gates_enforced "$id"; then ledger_append "$id" "handoff:$phase" "$current" "$phase" ""; fi
+  case "$phase" in
+    IMPLEMENTING) workflow_event "$id" --event stage --stage implement --status started ;;
+    IMPLEMENTED) workflow_event "$id" --event stage --stage implement --status completed --fingerprint "$patch" ;;
+    CODE_DONE) workflow_event "$id" --event stage --stage code_done --status passed --fingerprint "$patch" ;;
+    DONE) workflow_event "$id" --event outcome --stage done --status completed --fingerprint "$patch" ;;
+  esac
   echo "handoff recorded: $id $phase"
 }
 # $2 (default: 0/strict) — forwarded to verify_scope; see verify_scope's own
@@ -1223,7 +1273,11 @@ record_gate() {
   case "$g_result:$g_verdict" in pass:PASS|fail:FAIL) ;; *) fail "$g_report says 'Verdict: ${g_verdict:-<missing>}' but the gate result is '$g_result' (pass needs Verdict: PASS, fail needs Verdict: FAIL; a BLOCKED verdict records no gate)" ;; esac
   g_scratch=$(mktemp "${TMPDIR:-/tmp}/agent-gate.XXXXXX"); cat > "$g_scratch"
   g_summary=$(field_from "$g_scratch" summary); g_findings=$(field_from "$g_scratch" findings); g_fscope=$(field_from "$g_scratch" fix_scope); g_finstr=$(field_from "$g_scratch" fix_instruction)
+  g_sev=$(field_from "$g_scratch" severity); g_cat=$(field_from "$g_scratch" category)
   rm -f "$g_scratch"
+  case "$g_sev" in ''|critical|major|minor) ;; *) fail "invalid severity: $g_sev (want critical|major|minor)" ;; esac
+  case "$g_cat" in ''|correctness|security|scope|test|behavior|maintainability|other) ;; *) fail "invalid category: $g_cat (want correctness|security|scope|test|behavior|maintainability|other)" ;; esac
+  [ "$g_result" = fail ] || [ -z "$g_sev$g_cat" ] || fail "severity and category apply to a failing gate only"
   reject_generic_justification "$g_summary" || fail "$g_gate gate requires a specific summary (>=20 chars, not a stock phrase)"
   if [ "$g_result" = fail ]; then
     reject_generic_justification "$g_findings" || fail "a failing gate requires specific findings (>=20 chars)"
@@ -1243,11 +1297,13 @@ record_gate() {
     printf 'task_sha256: "%s"\nevidence_sha256: "%s"\nplan_sha256: "%s"\nqa_plan_sha256: "%s"\n' "$(section_value "$g_d" freeze task_sha256)" "$(section_value "$g_d" freeze evidence_sha256)" "$(section_value "$g_d" freeze plan_sha256)" "$(section_value "$g_d" freeze qa_plan_sha256)"
     printf 'policy_sha256: "%s"\npipeline: "%s"\n' "$(section_value "$g_d" freeze policy_sha256)" "$(section_value "$g_d" freeze pipeline)"
     printf 'summary: %s\n' "$(one_line "$g_summary")"
-    if [ "$g_result" = fail ]; then printf 'findings: %s\nfix_scope: %s\nfix_instruction: %s\n' "$(one_line "$g_findings")" "$g_fscope" "$(one_line "$g_finstr")"; fi
+    if [ "$g_result" = fail ]; then printf 'findings: %s\nfix_scope: %s\nfix_instruction: %s\n' "$(one_line "$g_findings")" "$g_fscope" "$(one_line "$g_finstr")"; [ -z "$g_sev" ] || printf 'severity: %s\n' "$g_sev"; [ -z "$g_cat" ] || printf 'category: %s\n' "$g_cat"; fi
     printf 'timestamp: "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "$g_gd/$g_name.yaml" || fail "could not write gate record"
   [ -s "$g_gd/$g_name.yaml" ] || { rm -f "$g_gd/$g_name.yaml" "$g_gd/$g_name.manifest"; fail "gate record was not written"; }
   ledger_append "$g_id" "gate:$g_gate:$g_result" IMPLEMENTED IMPLEMENTED "$g_name by $execution_role"
+  g_lc=$(printf '%s' "$g_gate" | tr 'A-Z' 'a-z'); g_att=$(ls -1 "$g_gd" | grep -c -- "-$g_gate\\.yaml\$" || true)
+  workflow_event "$g_id" --event gate --stage "$g_lc" --gate "$g_lc" --status "$(ev_result "$g_result")" --attempt "$g_att" --findings-open "$([ "$g_result" = fail ] && echo 1 || echo 0)" --fingerprint "$g_patch"
   echo "gate recorded: $g_id $g_name ($g_result)"
 }
 
@@ -1260,6 +1316,7 @@ reopen_for_fix() {
   [ "$g_used" -le "$g_max" ] || fail "bounded fix attempts exhausted ($g_used failing gates against this plan, max $g_max fixes): escalate — an explicit plan amendment and refreeze is required to continue"
   set_run_value "$g_id" handoff implemented_patch_sha256 PENDING
   set_run_value "$g_id" handoff code_done_patch_sha256 PENDING
+  workflow_event "$g_id" --event remediation --stage implement --status started --loop "$g_used"
 }
 
 # A plan amendment (refreeze) stales all frozen-hash-bound evidence, so a
@@ -1480,6 +1537,7 @@ terminate_run() {
   prev=$(run_state "$dir")
   set_run_value "$id" execution state "$outcome"
   ledger_append "$id" terminate "$prev" "$outcome" "reason: $reason; evidence: $evidence"
+  workflow_event "$id" --event outcome --stage "$([ "$(section_value "$dir" handoff state)" = PLANNED ] && echo plan || echo implement)" --status "$([ "$outcome" = FAILED ] && echo failed || echo blocked)"
   echo "run terminated: $id $outcome"
 }
 
@@ -1514,6 +1572,7 @@ knowledge_done() {
   ! local_task_source_run "$id" || verify_freshness "$id" >/dev/null
   tmp=$dir/RUN.yaml.tmp; replace_section_value "$dir" execution knowledge_state "$state" "$tmp" && mv "$tmp" "$dir/RUN.yaml"
   if gates_enforced "$id"; then ledger_append "$id" knowledge-done "$(section_value "$dir" handoff state)" "$state" ""; fi
+  workflow_event "$id" --event stage --stage knowledge --status "$([ "$state" = not_applicable ] && echo skipped || echo completed)"
   echo "knowledge state recorded: $id $state"
 }
 
@@ -1627,6 +1686,8 @@ freeze() {
     if [ "${2:-}" = refreeze ]; then refreeze_lifecycle "$id" "${3:-}"
     else ledger_append "$id" freeze "$(section_value "$dir" handoff state)" "$(section_value "$dir" handoff state)" "$(section_value "$dir" freeze pipeline)"; fi
   fi
+  if [ "$(pipeline_needs "$id" evidence)" = yes ]; then workflow_event "$id" --event stage --stage evidence --status completed; fi
+  workflow_event "$id" --event stage --stage plan --status completed
   echo "freeze recorded: $id"
 }
 
@@ -2465,11 +2526,14 @@ command=${1:-}
 # touch implementation evidence. Explorer and Architect are planning-phase
 # specialists that return findings to the orchestrator: they may read and
 # validate, and record nothing at all.
+# `summary` and `report` are projections: they write only the ignored default report path
+# (.agents/runtime/reports/), and `report --out` is refused for every role except
+# full_lifecycle (see oversight_run), so no read-only role can write a chosen file through it.
 case "$execution_role" in
   independent_reviewer|independent_qa|independent_verifier)
-    case "$command" in role|status|effective|pipeline|verify-*|freshness|validate|patch-fingerprint|gate) ;; *) fail "command denied for $execution_role" ;; esac ;;
+    case "$command" in role|status|effective|pipeline|verify-*|freshness|validate|patch-fingerprint|gate|summary|report) ;; *) fail "command denied for $execution_role" ;; esac ;;
   explorer|architect)
-    case "$command" in role|status|effective|pipeline|verify-*|freshness|validate|patch-fingerprint) ;; *) fail "command denied for $execution_role" ;; esac ;;
+    case "$command" in role|status|effective|pipeline|verify-*|freshness|validate|patch-fingerprint|summary|report) ;; *) fail "command denied for $execution_role" ;; esac ;;
 esac
 case "$command" in
   role) printf 'role=%s\n' "$execution_role" ;;
@@ -2479,6 +2543,9 @@ case "$command" in
   branch) require_full_lifecycle; branch_setup "${2:?usage: $0 branch <TASK-ID>}" ;;
   classify) require_full_lifecycle; classify "${2:?usage: $0 classify <TASK-ID> <TRIVIAL|STANDARD|COMPLEX|CRITICAL> [review]}" "${3:?usage: $0 classify <TASK-ID> <TRIVIAL|STANDARD|COMPLEX|CRITICAL> [review]}" "${4:-}" ;;
   pipeline) pipeline_show "${2:?usage: $0 pipeline <TASK-ID>}" ;;
+  summary) shift; oversight_run summary "$@" ;;
+  report) shift; oversight_run report "$@" ;;
+  oversight-model) shift; oversight_run model "$@" ;;
   decide) require_full_lifecycle; id=${2:?usage: $0 decide <TASK-ID> <RED|GREEN|REFACTOR|FIX> [--failure CODE] [--model M] [--effort E] [--delegation N] [--context-bytes B]}; ph=${3:?usage: $0 decide <TASK-ID> <PHASE> ...}; shift 3; decide "$id" "$ph" "$@" ;;
   decision-outcome) require_full_lifecycle; id=${2:?usage: $0 decision-outcome <TASK-ID> <PHASE> <success|failure> [k=v ...]}; ph=${3:?}; oc=${4:?}; shift 4; decision_outcome "$id" "$ph" "$oc" "$@" ;;
   freeze) require_full_lifecycle; freeze "${2:?usage: $0 freeze <TASK-ID>}" ;;
@@ -2507,7 +2574,7 @@ case "$command" in
   publish-completion-report) publish_completion_report "${2:?usage: $0 publish-completion-report <TASK-ID> [ADAPTER]}" "${3:-markdown}" ;;
   verify-completion-report) verify_completion_report "${2:?usage: $0 verify-completion-report <TASK-ID>}" ;;
   validate) validate_run "${2:?usage: $0 validate <TASK-ID>}" ;;
-  test) require_full_lifecycle; fixture_test; sh "$root/scripts/exec-policy-test.sh"; sh "$root/scripts/lifecycle-test.sh"; branch_test; policy_test; standalone_test; worker_evidence_write_failure_test; knowledge_scope_test; delivery_check_knowledge_scope_test; validate_knowledge_scope_test; wiki_lint_self_scan_test ;;
+  test) require_full_lifecycle; fixture_test; sh "$root/scripts/exec-policy-test.sh"; sh "$root/scripts/lifecycle-test.sh"; sh "$root/scripts/oversight-test.sh"; sh "$root/scripts/oversight-model-test.sh"; branch_test; policy_test; standalone_test; worker_evidence_write_failure_test; knowledge_scope_test; delivery_check_knowledge_scope_test; validate_knowledge_scope_test; wiki_lint_self_scan_test ;;
   role-test) require_full_lifecycle; role_test ;;
-  *) echo "usage: $0 {role|status|effective|baseline|branch|classify|pipeline|freeze|refreeze|verify-freeze|verify-scope|verify-knowledge-scope|freshness|handoff|verify-handoff|delivery-check|worker-evidence|verify-worker-evidence|gate|amend|terminate|cleanup|patch-fingerprint|window-open|window-close|verify-gates|verify-seal|task-source-relocate|task-source-status|knowledge-done|publish-completion-report|verify-completion-report|validate|test|role-test} [TASK-ID]" >&2; exit 2 ;;
+  *) echo "usage: $0 {role|status|effective|baseline|branch|classify|pipeline|freeze|refreeze|verify-freeze|verify-scope|verify-knowledge-scope|freshness|handoff|verify-handoff|delivery-check|worker-evidence|verify-worker-evidence|gate|amend|terminate|cleanup|patch-fingerprint|window-open|window-close|verify-gates|verify-seal|task-source-relocate|task-source-status|knowledge-done|publish-completion-report|verify-completion-report|validate|summary|report|oversight-model|test|role-test} [TASK-ID]" >&2; exit 2 ;;
 esac

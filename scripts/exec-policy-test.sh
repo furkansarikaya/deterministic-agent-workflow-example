@@ -148,6 +148,6 @@ fi
 
 CASE="no downstream policy: model ids and effort levels live only in the config"
 if grep -nE 'gpt-[0-9]|model_reasoning_effort=(low|medium|high|xhigh|max)' "$root/scripts/"*.sh | grep -v 'exec-policy-test.sh\|lifecycle-test.sh\|# ' | grep -v '^scripts/agent.sh:.*_test'; then bad "$CASE: a script hardcodes a model or effort"; fi; ok
-if grep -n 'exec-policy.sh' "$root/scripts/"*.sh | grep -vE 'exec-policy(-test)?\.sh:|agent\.sh:|lifecycle-test\.sh:'; then bad "$CASE: only agent.sh may call the resolver"; fi; ok
+if grep -n 'exec-policy.sh' "$root/scripts/"*.sh | grep -vE 'exec-policy(-test)?\.sh:|agent\.sh:|lifecycle-test\.sh:|oversight-test\.sh:'; then bad "$CASE: only agent.sh may call the resolver"; fi; ok
 
 echo "execution policy tests passed ($n assertions)"

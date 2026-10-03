@@ -8,6 +8,7 @@
 | CAPABILITY PLANE: vibecosystem | available skills, roles, hooks, workers | task scope or workflow authority |
 | KNOWLEDGE PLANE: `docs/wiki` | sourced project knowledge and history | canonical truth or active instructions |
 | OBJECTIVE REPOSITORY STATE | code, tests, build/static results | rationale for work |
+| OVERSIGHT: `scripts/oversight` (sh + awk) | read-only projection of run state: CLI summary, HTML report, diagrams, optional workflow events | truth, evidence, gates |
 
 Engineering determinism means the same repository SHA, contract, frozen evidence, frozen plan, policy/capability set, and verification commands produce the same observable acceptance result—not identical model prose.
 
@@ -19,6 +20,7 @@ Engineering determinism means the same repository SHA, contract, frozen evidence
 - memory != evidence: recalled context cannot silently join frozen evidence.
 - review != QA != verification: the Reviewer judges the code, QA judges behavior against the frozen QA plan, the Verifier mechanically proves the frozen plan was implemented — three independent gates, required per task classification.
 - run state is disposable: `.agents/runs/<ID>/` is temporary working state, deleted at completion; permanent knowledge is source code, workflow contracts and (rarely) the wiki.
+- presentation != truth: the oversight model, summary and report project run state for humans. They are not evidence, hold no fact run state lacks, and never gate a task (`.agents/OVERSIGHT.md`).
 - CODE DONE != KNOWLEDGE DONE: source knowledge is written only in Transaction B.
 
 ```mermaid

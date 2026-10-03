@@ -1,6 +1,6 @@
 # Deterministic agent control plane
 
-The canonical workflow is `.agents/WORKFLOW.md`: a deterministic orchestrator, bounded specialist roles, explicit artifacts, independent quality gates. This file is the boot protocol; do not restate the workflow elsewhere.
+The canonical workflow is `.agents/WORKFLOW.md`: a deterministic orchestrator, bounded specialist roles, explicit artifacts, independent quality gates. This file is the boot protocol. Do not restate the workflow elsewhere.
 
 ## Boot protocol (any agent: Claude Code, Codex, ...)
 
@@ -14,15 +14,14 @@ The canonical workflow is `.agents/WORKFLOW.md`: a deterministic orchestrator, b
 
 ## Roles and topology
 
-`AGENT_ROLE` is invocation-scoped, never agent identity: the default `full_lifecycle` is the Orchestrator and lets either Claude or Codex own the whole lifecycle. A session explicitly delegated a bounded role (`implementation_worker`, `explorer`, `architect`, `independent_qa`, `independent_reviewer`, `independent_verifier`) obeys that role's boundary in `.agents/WORKFLOW.md`, returns its result to the orchestrator, and cannot plan, freeze, advance the task, deliver, or delegate. Only the Orchestrator declares DONE. There is no swarm and no recursive delegation; implementation has exactly one worker.
-
-Execution topology (`execution.topology` in `RUN.yaml`, else `default_topology` in `.agents/config.yaml`) is separate from role: under `standalone`, `full_lifecycle` implements RED/GREEN itself; under `orchestrated` it must delegate implementation to `implementation_worker` through `scripts/worker-run.sh` and must not implement application code — and a failed worker invocation leaves the task incomplete rather than licensing self-implementation.
+`AGENT_ROLE` names the invocation, never the agent. The default `full_lifecycle` is the Orchestrator: Claude or Codex MAY own the whole lifecycle. A session delegated a bounded role MUST obey that role's boundary in `.agents/WORKFLOW.md` ("Modes and roles") and MUST return its result to the Orchestrator. A bounded role MUST NOT plan, freeze, advance the task, deliver or delegate. Only the Orchestrator declares DONE. Topology (`standalone` or `orchestrated`) is separate from role: see "Execution topology" in the workflow.
 
 ## Rules that always apply
 
-- Progressive disclosure: TASK and the current repository/tests are primary context. Load `.agents/ENGINEERING.md`, `GIT.md`, `VERIFICATION.md`, `KNOWLEDGE.md`, `VIBECOSYSTEM.md` only when their rules apply; never bulk-load `.agents/**`, `docs/wiki/**`, or session history. Evidence and plans hold references and decisions, not copied documents.
-- User-owned uncommitted changes are never reset, overwritten, staged or claimed; the baseline fingerprints them so scope checks can tell them from task changes.
-- Vibecosystem is capability-only: use allowlisted capabilities inside the frozen contract; never auto-start swarm, recall, learning or scope mutation.
-- `CODE_DONE` is blocked by failed or missing required gates, freeze/freshness mismatch, unexpected or unmapped paths, stale fingerprints, missing implementation evidence or TDD exemption, or unexplained user changes. It never authorizes commit, push, PR/MR or external task updates; those need explicit authorization after `delivery-check`. `DONE` additionally needs the knowledge step, a published and verified completion report, and is followed by `cleanup`.
+- Progressive disclosure: TASK and the current repository and tests are the primary context. Load `.agents/ENGINEERING.md`, `GIT.md`, `VERIFICATION.md`, `KNOWLEDGE.md`, `OVERSIGHT.md`, `VIBECOSYSTEM.md` only when their rules apply. MUST NOT bulk-load `.agents/**`, `docs/wiki/**` or session history. Evidence and plans hold references and decisions, not copied documents.
+- MUST NOT reset, overwrite, stage or claim user-owned uncommitted changes. The baseline fingerprints them so scope checks can tell them from task changes.
+- Vibecosystem is capability-only. Use allowlisted capabilities inside the frozen contract. MUST NOT auto-start swarm, recall, learning or scope mutation.
+- `CODE_DONE` FAILS on: a failed or missing required gate, a freeze or freshness mismatch, an unexpected or unmapped path, a stale fingerprint, missing implementation evidence or TDD exemption, or an unexplained user change. `CODE_DONE` grants no delivery right (WORKFLOW "Completion, delivery and cleanup").
+- Oversight output (`summary`, `report`) is a projection of run state, not evidence. It MUST NOT change a run artifact (`.agents/OVERSIGHT.md`).
 
 This example's control-plane and template maintenance is an explicit exception, only when the user requests it: maintain the current files directly, without creating a run. Normal application work always uses this protocol.

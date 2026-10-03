@@ -2,13 +2,10 @@
 scope:
   - path: path/to/file
     criteria: [AC-1]
-    # Optional. Only set this when RED/GREEN evidence genuinely does not
-    # apply to this path (docs-only, metadata-only, pure control-plane
-    # config). Must be specific (>=20 chars) and not a generic stock phrase
-    # ("tdd not needed", "configuration change", etc.) — agent.sh rejects
-    # both at freeze time. Omit the key entirely for any behavior-changing
-    # path; it then requires implementation_worker RED+GREEN evidence
-    # before IMPLEMENTED (see `worker-evidence` in .agents/VERIFICATION.md).
+    # Optional. Set it only when RED/GREEN evidence does not apply to this path (docs, metadata,
+    # control-plane config). The reason MUST be specific: >= 20 characters, no stock phrase.
+    # agent.sh rejects both at freeze time. Omit the key for a behavior-changing path: it then
+    # needs RED and GREEN evidence before IMPLEMENTED (`worker-evidence` in .agents/VERIFICATION.md).
     # tdd_exemption: "why RED/GREEN does not apply here, specifically"
 ---
 
@@ -30,4 +27,4 @@ Required for COMPLEX and CRITICAL tasks only (delete this section otherwise). Th
 
 ## Amendment rule
 
-After freeze, an added path or changed constraint requires an amendment under `amendments/`, an updated evidence/plan version, and explicit re-freeze. Never silently alter frozen history.
+After freeze, a path or constraint changes only through an amendment and `refreeze` (`.agents/WORKFLOW.md` "Freezes").

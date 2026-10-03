@@ -1,6 +1,6 @@
 # Review: <TASK-ID>
 
-Owner: Reviewer. Judge the actual diff against TASK, frozen EVIDENCE/PLAN and the engineering rules — not "tests passed". Do not repair code.
+Owner: Reviewer. Judge the actual diff against TASK, frozen EVIDENCE and PLAN, and the engineering rules. "Tests passed" is not a review. MUST NOT repair code.
 
 Verdict: PASS | FAIL
 
@@ -10,4 +10,4 @@ Verdict: PASS | FAIL
 
 ## Findings
 
-<correctness, maintainability, architecture compliance, security, unnecessary complexity, scope expansion, shortcuts — each with `path:line` and why. For FAIL, the finding, the fix_scope and the fix instruction the gate record will carry.>
+Cover correctness, maintainability, architecture compliance, security, needless complexity, scope expansion and shortcuts. Give each finding as `path:line` and the reason. FAIL: add the `fix_scope` and fix instruction the gate record carries, plus optional `severity` and `category`.

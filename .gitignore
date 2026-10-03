@@ -3,3 +3,6 @@ coverage.out
 bin/
 # Runtime task state is disposable working state, never committed (see .agents/WORKFLOW.md "Runtime artifacts").
 .agents/runs/
+
+# Generated oversight reports and event counters: disposable, never committed (see .agents/OVERSIGHT.md).
+.agents/runtime/

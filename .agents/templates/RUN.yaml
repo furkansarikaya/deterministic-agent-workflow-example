@@ -1,7 +1,5 @@
-# Runtime state for one task (`.agents/runs/<TASK-ID>/`, disposable — see
-# .agents/WORKFLOW.md "Runtime artifacts"). Only lifecycle facts belong here.
-# `agent.sh baseline <TASK-ID>` replaces the pending baseline block with captured
-# base-SHA and file fingerprints; it never stores file contents.
+# Runtime state for one task (`.agents/runs/<TASK-ID>/`, disposable: .agents/WORKFLOW.md
+# "Runtime artifacts"). Only lifecycle facts belong here. `agent.sh baseline` fills the baseline block.
 task:
   id: <TASK-ID>
 
@@ -13,10 +11,8 @@ repository:
 task_source:
   type: local_markdown
   path: <REPOSITORY-RELATIVE-TASK-SOURCE.md>
-  # A hash of the frozen task *contract* (the task source minus its `**Status:**`
-  # value and its published completion-report block), written only by
-  # freeze/refreeze; the file's location changes only via
-  # `agent.sh task-source-relocate`. See .agents/WORKFLOW.md "Task-source contract".
+  # Hash of the frozen task contract. Only freeze and refreeze write it.
+  # See .agents/WORKFLOW.md "Task-source contract".
   revision: PENDING
 
 execution:
@@ -24,13 +20,11 @@ execution:
   profile: core
   state: PLANNING
   knowledge_state: not_started
-  # standalone | orchestrated, or PENDING to inherit .agents/config.yaml's
-  # default_topology. See .agents/WORKFLOW.md "Execution topology".
+  # standalone | orchestrated, or PENDING to inherit `default_topology` (.agents/config.yaml).
   topology: PENDING
 
-# Written by `agent.sh classify <TASK-ID> <TRIVIAL|STANDARD|COMPLEX|CRITICAL>`; it
-# selects which artifacts are frozen and which gates are required (.agents/config.yaml
-# `pipelines:`). Run `agent.sh pipeline <TASK-ID>` to see what it requires.
+# Written by `agent.sh classify`. It selects the frozen artifacts and the required gates
+# (`pipelines:` in .agents/config.yaml). `agent.sh pipeline <TASK-ID>` prints them.
 pipeline:
   classification: PENDING
   review: PENDING
@@ -52,11 +46,9 @@ handoff:
   implemented_patch_sha256: PENDING
   code_done_patch_sha256: PENDING
 
-# Presence of these keys (not their values) subjects a run to worker-evidence /
-# TDD / completion-report enforcement, and — for `lifecycle_gates` — to the
-# classification-driven REVIEW/QA/VERIFY gates, tree-attested implementation
-# ownership, the hash-chained lifecycle ledger (LEDGER.log) and the scripted
-# `agent.sh amend` reopen. See .agents/WORKFLOW.md "Lifecycle gates".
+# The presence of these keys, not their values, subjects a run to worker-evidence, TDD and
+# completion-report enforcement. `lifecycle_gates` adds the gates, attested tree ownership,
+# the ledger and `agent.sh amend` (.agents/WORKFLOW.md "Quality gates and remediation").
 worker_evidence:
   required: true
 

@@ -1,17 +1,20 @@
 # Verification: <TASK-ID>
 
-Owner: Verifier. Did we implement the frozen plan, and can the repository prove it? Run the commands; never edit the implementation to obtain a pass.
+Owner: Verifier. Question: did we implement the frozen plan, and can the repository prove it? Run the commands. MUST NOT edit the implementation to obtain a pass.
 
 Verdict: PASS | FAIL | BLOCKED
 
 ## Commands
 
-- `<exact command>` — exit status and the relevant output
+- `<exact command>` | exit=<n>
+  output: <the relevant output, one short line>
+
+Record the relevant output under each command as an indented `output:` line (what shows it passed, or why it failed). The `| exit=<n>` suffix is machine-read; the output line is for people.
 
 ## Plan conformance
 
-<every frozen scope path exists and changed as planned; `agent.sh verify-scope`, `verify-freeze`, `verify-worker-evidence` results; lint/static analysis where the repository rules require it>
+Every frozen scope path exists and changed as planned. Record `agent.sh verify-scope`, `verify-freeze` and `verify-worker-evidence` results, and lint or static analysis where repository rules require it.
 
 ## Failures
 
-<for FAIL: the failing command and output, and the fix_scope/fix instruction the gate record will carry. For BLOCKED: the environment/tooling problem; no gate is recorded.>
+FAIL: the failing command and output, plus the `fix_scope` and fix instruction the gate record carries. BLOCKED: the environment or tooling problem. A BLOCKED verdict records no gate.

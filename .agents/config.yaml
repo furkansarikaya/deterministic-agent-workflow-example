@@ -1,18 +1,8 @@
 default_mode: deterministic
 default_profile: core
-# Execution topology is a separate concept from agent role (full_lifecycle /
-# implementation_worker): it says whether a run needs a second, delegated
-# implementation owner at all. `standalone` — the active full_lifecycle
-# agent (Claude, Codex, or any other vendor — the control plane does not
-# care) implements its own RED/GREEN evidence. `orchestrated` — full_lifecycle
-# delegates RED/GREEN/REFACTOR/fix implementation to implementation_worker
-# and must not implement application code itself. A run's own RUN.yaml
-# (execution.topology) may override this per run; this is only the
-# repository-wide default a new run inherits when it does not. This
-# reference repository defaults to `standalone` as the least-surprising
-# choice — it demonstrates the full lifecycle without requiring a second
-# vendor/tool to be configured. See .agents/WORKFLOW.md's "Execution
-# topology" section.
+# Default execution topology: standalone | orchestrated. A run's `execution.topology` overrides it.
+# This reference repository defaults to `standalone`: it needs no second tool.
+# Semantics: .agents/WORKFLOW.md "Execution topology".
 default_topology: standalone
 active_run_file: .agents/ACTIVE_RUN
 # Checked-in template state: ACTIVE_RUN is empty. A real task explicitly sets one ID.
@@ -20,22 +10,16 @@ policy_source: .agents/modes
 # Single authoritative source for the canonical integration branch. A deterministic
 # task run must never implement directly on this branch; see .agents/GIT.md.
 canonical_branch: main
-# The explicit Transaction B (knowledge transaction) scope boundary — a single
-# repository-relative directory prefix (trailing slash required). A path under
-# this root is never part of a run's frozen PLAN.md (Transaction A/application)
-# scope; it is validated separately by `agent.sh verify-knowledge-scope`, gated
-# on `execution.knowledge_state` being recorded `KNOWLEDGE_DONE`/`not_applicable`
-# (see .agents/WORKFLOW.md's "Knowledge transaction scope" section). This is a
-# deliberate allowlist, not "everything verify_scope doesn't recognize" — a path
-# outside this root is always evaluated as application scope, never as knowledge
-# scope, no matter what a run's knowledge_state says.
+# Knowledge transaction scope: one repository-relative directory prefix, trailing slash required.
+# A path under it is never application scope. A path outside it always is.
+# Semantics: .agents/WORKFLOW.md "Knowledge transaction scope".
 knowledge_scope_root: docs/wiki/
 safety:
   destructive_git_requires_explicit_authorization: true
   external_network_requires_task_authorization: true
   dependency_changes_require_task_authorization: true
-# Task classification selects the lifecycle (see .agents/WORKFLOW.md "Pipeline
-# selection"). Every key here is consumed by scripts/agent.sh:
+# Task classification selects the lifecycle (.agents/WORKFLOW.md "Pipeline selection").
+# scripts/agent.sh consumes every key:
 #   evidence         EVIDENCE.md is produced and frozen
 #   qa               QA_PLAN.md is produced and frozen, and the QA gate is required
 #   review           yes | no | optional (STANDARD: opted in per run by `classify <ID> STANDARD review`)
@@ -70,13 +54,10 @@ pipelines:
     review: yes
     architect: yes
     max_explorers: 3
-# Execution policy: the ONE place a run's model, reasoning effort, context budget,
-# cache strategy, planning depth, delegation, validation depth and retry/escalation
-# limits are decided. scripts/exec-policy.sh is the only resolver; `agent.sh decide`
-# is its only caller and records one decision per attempt; scripts/worker-run.sh
-# consumes that decision and never chooses these values itself. Task class (the
-# `pipelines:` block above) stays the primary input. See .agents/WORKFLOW.md
-# "Execution policy". Values below are plain scalars (no trailing comments).
+# Execution policy: the one place that decides a run's model, effort, context budget, cache strategy,
+# planning depth, delegation, validation depth and escalation limits. scripts/exec-policy.sh resolves
+# it, `agent.sh decide` is its only caller and scripts/worker-run.sh consumes the decision.
+# Semantics: .agents/WORKFLOW.md "Execution policy". Values below are plain scalars (no trailing comments).
 execution_policy:
   # Policy SEMANTICS version. Bump it when resolution, precedence or escalation
   # behavior changes; NOT for editing this inventory (models, tiers, budgets).
@@ -100,13 +81,9 @@ execution_policy:
     COMPLEX: tier=2 effort=high context_bytes=98304
     CRITICAL: tier=3 effort=xhigh context_bytes=163840
   effort_order: low medium high xhigh max
-  # Only the implementation_worker adapter is repository-controllable. Under
-  # `standalone` the full_lifecycle session owns its own model/effort; nothing here
-  # can change a running session, so the decision records that instead of guessing.
-  # Ladder = cheapest to strongest, operator-declared; capabilities were verified
-  # against `codex exec --help` and ~/.codex/models_cache.json (`exec-policy.sh
-  # check-capabilities` re-verifies them). `ultra` (automatic delegation) is
-  # supported by some models but forbidden above.
+  # Only the implementation_worker adapter is repository-controllable. The ladder runs cheapest to
+  # strongest and the operator declares it. `exec-policy.sh check-capabilities` re-verifies it.
+  # `ultra` (automatic delegation) is forbidden above.
   providers:
     codex:
       role: implementation_worker
