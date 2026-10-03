@@ -119,7 +119,7 @@ scaffold() {
   tpath=tasks/LC.md; [ "$layout" = yes ] && tpath=tasks/in-progress/LC.md
   n_fx=$((n_fx + 1)); fx=$base/fx$n_fx
   mkdir -p "$fx/.agents/runs/LC" "$fx/.agents/modes" "$fx/.agents/task-integrations" "$fx/scripts" "$fx/tasks"
-  cp "$root/scripts/agent.sh" "$root/scripts/worker-run.sh" "$root/scripts/exec-policy.sh" "$fx/scripts/"; cp "$root/.agents/config.yaml" "$root/.agents/ENGINEERING.md" "$root/.agents/VERIFICATION.md" "$fx/.agents/"
+  cp "$root/scripts/agent.sh" "$root/scripts/worker-run.sh" "$root/scripts/exec-policy.sh" "$fx/scripts/"; [ ! -d "$root/scripts/oversight" ] || cp -R "$root/scripts/oversight" "$fx/scripts/"; [ ! -d "$root/.agents/skills" ] || cp -R "$root/.agents/skills" "$fx/.agents/"; cp "$root/.agents/config.yaml" "$root/.agents/ENGINEERING.md" "$root/.agents/VERIFICATION.md" "$fx/.agents/"
   cp "$root/.agents/task-integrations/markdown.sh" "$fx/.agents/task-integrations/"; chmod +x "$fx/.agents/task-integrations/markdown.sh"
   for m in "$root/.agents/modes/"*.yaml; do
     sed "s/independent: true/independent: $indep/; s/independent_verifier: true/independent_verifier: $indep/" "$m" > "$fx/.agents/modes/$(basename "$m")"
@@ -928,6 +928,8 @@ STUB
   echo "lifecycle: execution policy end to end passed"
 }
 
+# LC_LIB=1 (scripts/oversight-test.sh sources this file) defines the helpers and runs no scenario.
+if [ -z "${LC_LIB:-}" ]; then
 run_sc scenario_standalone claude
 run_sc scenario_standalone codex short
 run_sc scenario_independence
@@ -955,3 +957,4 @@ run_sc scenario_task_contract_projection
 run_sc scenario_task_source_status
 run_sc scenario_task_source_status_done
 echo 'agent lifecycle tests passed'
+fi

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Oversight report</title>
+<style>
+:root{--bg:#f7f7f5;--fg:#1d1f21;--mut:#5c6166;--card:#fff;--line:#d9dbd6;--ok:#17653a;--bad:#a4262c;--warn:#8a5a00;--act:#1b5fa8}
+@media (prefers-color-scheme:dark){:root{--bg:#16181a;--fg:#e8e9e6;--mut:#a0a5a9;--card:#1f2224;--line:#3a3f43;--ok:#6fcf97;--bad:#ff8a8f;--warn:#e0b050;--act:#7db4f0}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:56rem;margin:0 auto;padding:1rem}
+h1{font-size:1.4rem;margin:.2rem 0}
+h2{font-size:1.05rem;margin:0 0 .6rem}
+section,.notice{background:var(--card);border:1px solid var(--line);border-radius:.5rem;padding:.9rem 1rem;margin:.8rem 0}
+.notice{border-left:.3rem solid var(--warn)}
+.mut{color:var(--mut)}
+.tag{font-size:.72rem;border:1px solid var(--line);border-radius:.8rem;padding:0 .5rem;margin-left:.5rem;color:var(--mut);white-space:nowrap}
+.tag.recorded{border-color:var(--ok)}.tag.derived{border-color:var(--act)}.tag.unavailable{border-style:dashed}
+.na{font-style:italic;color:var(--mut)}
+dl{display:grid;grid-template-columns:max-content 1fr;gap:.2rem 1rem;margin:0}
+dt{color:var(--mut)}dd{margin:0;overflow-wrap:anywhere}
+ul{margin:0;padding-left:1.1rem}li{margin:.2rem 0;overflow-wrap:anywhere}
+.chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0}
+.chip{border:1px solid var(--line);border-radius:.4rem;padding:.15rem .6rem}
+.chip.done{border-color:var(--ok);color:var(--ok)}.chip.failed,.chip.blocked{border-color:var(--bad);color:var(--bad)}
+.chip.active{border-color:var(--act);color:var(--act)}.chip.pending,.chip.skipped{border-style:dashed;color:var(--mut)}
+.role.expected_no_record{border-style:dashed;color:var(--mut)}.role.recorded{border-color:var(--ok)}
+table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:.2rem .5rem;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+td.n{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.pass{color:var(--ok)}.fail{color:var(--bad)}
+@media (max-width:34rem){dl{grid-template-columns:1fr}dt{margin-top:.4rem}main{padding:.5rem}}
+@media (prefers-reduced-motion:no-preference){.chip{transition:border-color .15s}}
+</style>
+</head>
+<body>
+<main id="app"><p class="na">Rendering requires JavaScript.</p></main>
+<script type="application/json" id="oversight-data">
+__OVERSIGHT_DATA__
+</script>
+<script>
+(function () {
+  "use strict";
+  var app = document.getElementById("app");
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = String(text);
+    return e;
+  }
+  function add(parent) { for (var i = 1; i < arguments.length; i++) parent.appendChild(arguments[i]); return parent; }
+  function val(v) { return v === null || v === undefined || v === "" ? el("span", "na", "unavailable") : el("span", "", v); }
+  function tag(kind) { return el("span", "tag " + kind, kind); }
+  function section(title, kind) {
+    var s = el("section"), h = el("h2", "", title);
+    if (kind) h.appendChild(tag(kind));
+    return add(s, h);
+  }
+  function list(items, build, cls) {
+    var ul = el("ul", cls);
+    items.forEach(function (it) { add(ul, build(it)); });
+    return ul;
+  }
+  function row(dl, k, v) { add(dl, el("dt", "", k), add(el("dd"), val(v))); }
+  function render(d) {
+    app.textContent = "";
+    var head = el("header");
+    add(head, el("h1", "", "Oversight report: " + d.task.id), add(el("p", "mut"), val(d.task.title)));
+    add(app, head, el("p", "notice", "This report is a derived view of workflow files. It is not evidence, a gate or a verdict. It MUST NOT be used to approve work. It is disposable."));
+
+    var ov = section("Overview", "recorded"), dl = el("dl");
+    row(dl, "Run state", d.status.run); row(dl, "Handoff", d.status.handoff); row(dl, "Knowledge", d.status.knowledge);
+    row(dl, "Class", d["class"]); row(dl, "Topology", d.topology);
+    add(app, add(ov, dl));
+
+    var fl = section("Execution flow", "derived");
+    add(fl, list(d.flow, function (f) { return el("li", "chip " + f.state, f.stage + ": " + f.state); }, "chips"));
+    add(app, fl);
+
+    var ro = section("Roles");
+    if (d.roles.length) add(ro, list(d.roles, function (r) {
+      return el("li", "chip role " + r.state, r.role + (r.state === "recorded" ? ": recorded" : ": expected, no record"));
+    }, "chips")); else add(ro, val(null));
+    add(ro, el("p", "mut", "Expected is not proof. A role that left no record has no execution evidence."));
+    add(app, ro);
+
+    var at = section("Attempts", "derived"), keys = Object.keys(d.attempts);
+    if (keys.length) add(at, list(keys, function (k) { return el("li", "", k + ": " + d.attempts[k] + " gate record(s)"); })); else add(at, val(null));
+    if (d.fixLoops > 0) add(at, el("p", "", "Remediation loops recorded: " + d.fixLoops));
+    add(app, at);
+
+    var ac = section("Acceptance criteria", "recorded");
+    if (d.criteria.length) add(ac, list(d.criteria, function (c) { return el("li", "", c.id + ": " + c.text); })); else add(ac, val(null));
+    add(app, ac);
+
+    var cf = section("Changed files", "derived");
+    if (d.files.length) {
+      var t = el("table"), tb = el("tbody"), a = 0, r = 0;
+      add(t, add(el("thead"), add(el("tr"), el("th", "", "Path"), el("th", "n", "+"), el("th", "n", "-"))));
+      d.files.forEach(function (f) {
+        a += f.add || 0; r += f.del || 0;
+        add(tb, add(el("tr"), el("td", "", f.path), el("td", "n", f.add === null ? "bin" : "+" + f.add), el("td", "n", f.del === null ? "bin" : "-" + f.del)));
+      });
+      add(cf, add(t, tb), el("p", "mut", d.files.length + " file(s), +" + a + " -" + r + ". Counts only; no content."));
+    } else add(cf, val(null));
+    add(app, cf);
+
+    var fi = section("Findings", "recorded");
+    if (d.findings.length) add(fi, list(d.findings, function (f) {
+      var li = el("li", "", f.gate + " #" + f.seq + " (" + (f.open ? "open" : "superseded by a later record") + "): " );
+      add(li, val(f.text));
+      if (f.fixScope.length) add(li, el("div", "mut", "fix scope: " + f.fixScope.join(", ")));
+      return li;
+    })); else add(fi, el("span", "", "No failing gate record."));
+    add(app, fi);
+
+    var ve = section("Verification", "recorded");
+    if (d.verification.length) add(ve, list(d.verification, function (c) {
+      return el("li", c.exit === 0 ? "pass" : "fail", (c.exit === 0 ? "exit 0: " : "exit " + c.exit + ": ") + c.command);
+    })); else add(ve, val(null));
+    add(app, ve);
+
+    var pv = section("Provenance");
+    add(pv, list([["recorded", "Read verbatim from a workflow file."], ["derived", "Computed from recorded files by agent.sh report."], ["unavailable", "No workflow file states it. Nothing is estimated."]],
+      function (p) { return add(el("li"), tag(p[0]), el("span", "", " " + p[1])); }));
+    add(app, pv);
+  }
+  try { render(JSON.parse(document.getElementById("oversight-data").textContent)); }
+  catch (e) { app.textContent = ""; add(app, el("p", "notice", "No report data. Run ./scripts/agent.sh report to generate this page.")); }
+})();
+</script>
+</body>
+</html>

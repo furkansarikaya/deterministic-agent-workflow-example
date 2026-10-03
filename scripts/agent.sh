@@ -13,15 +13,10 @@ require_full_lifecycle() { [ "$execution_role" = full_lifecycle ] || fail "comma
 
 valid_task_id() { case "$1" in *[!A-Za-z0-9_-]*|'') return 1;; esac; }
 
-# --- Oversight (read-only projection) and workflow events (observer-only) ----
-# Both are presentation, never truth: they read run state, write only under the
-# ignored .agents/runtime/, and a failure in either never fails a lifecycle command.
-# Both are sh + awk (scripts/oversight/); neither needs any language toolchain.
-# See .agents/OVERSIGHT.md.
-# workflow_event <ID> --event E --stage S --status T [--gate G --attempt N --loop N --findings-open N --fingerprint H --role R]
-# The role on an event is the role that emitted it: the invoking AGENT_ROLE. A call site must not pass --role to
-# claim another role (for example the expected implementation owner), because that role may never have acted.
-# No-op unless AGENT_WORKFLOW_EVENTS_URL is set. Always returns 0.
+# --- Workflow events (optional observer) -------------------------------------
+# workflow_event <ID> --event E --stage S --status T [--gate G --attempt N --loop N --findings-open N --fingerprint H]
+# No-op unless AGENT_WORKFLOW_EVENTS_URL is set. Fail-open: always returns 0. The event contract is the header of scripts/oversight/event.sh.
+# The role on an event is the invoking AGENT_ROLE. A call site MUST NOT pass --role to claim another role.
 workflow_event() {
   [ -n "${AGENT_WORKFLOW_EVENTS_URL:-}" ] || return 0
   we_id=$1; shift
@@ -29,30 +24,7 @@ workflow_event() {
   sh "$root/scripts/oversight/event.sh" --root "$root" --task "$we_id" --role "$execution_role" --topology "$we_topo" "$@" >/dev/null 2>&1 || true
   return 0
 }
-# Event status words, as plain functions (no `case` inside `$( )`: bash 3.2 mis-parses that).
 ev_result() { if [ "$1" = pass ] || [ "$1" = success ]; then echo passed; else echo failed; fi; }
-oversight_task() { # [ID] -> the task to project (the active run when omitted)
-  ot=${1:-}; [ -n "$ot" ] || ot=$(active_run) || return 1
-  [ -n "$ot" ] || fail "no active task: pass a TASK-ID"
-  require_run "$ot"; printf '%s\n' "$ot"
-}
-oversight_run() { # summary|report|model [ID] [--out FILE]
-  or_cmd=$1; shift; or_id=''; or_out=''
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --out) [ -n "${2:-}" ] || fail "usage: $0 $or_cmd [TASK-ID] [--out FILE]"; or_out=$2; shift 2 ;;
-      -*) fail "unknown option: $1" ;;
-      *) [ -z "$or_id" ] || fail "usage: $0 $or_cmd [TASK-ID] [--out FILE]"; or_id=$1; shift ;;
-    esac
-  done
-  [ "$or_cmd" = report ] || [ -z "$or_out" ] || fail "--out applies to report only"
-  # --out chooses where a file is written, so only full_lifecycle may use it. Every other role (the read-only
-  # observers, planners and the implementation worker) writes only the default path under the ignored
-  # .agents/runtime/reports/. oversight.sh additionally refuses run state, symlinks and tracked files for everyone.
-  [ -z "$or_out" ] || [ "$execution_role" = full_lifecycle ] || fail "--out is only available to full_lifecycle (role: $execution_role); the default report path is .agents/runtime/reports/<TASK-ID>.html"
-  or_id=$(oversight_task "$or_id") || return 1
-  if [ -n "$or_out" ]; then sh "$root/scripts/oversight/oversight.sh" "$or_cmd" --root "$root" --task "$or_id" --out "$or_out"; else sh "$root/scripts/oversight/oversight.sh" "$or_cmd" --root "$root" --task "$or_id"; fi
-}
 
 # Empty is the intentional checked-in template state. Missing or malformed is not.
 active_run() {
@@ -1273,11 +1245,7 @@ record_gate() {
   case "$g_result:$g_verdict" in pass:PASS|fail:FAIL) ;; *) fail "$g_report says 'Verdict: ${g_verdict:-<missing>}' but the gate result is '$g_result' (pass needs Verdict: PASS, fail needs Verdict: FAIL; a BLOCKED verdict records no gate)" ;; esac
   g_scratch=$(mktemp "${TMPDIR:-/tmp}/agent-gate.XXXXXX"); cat > "$g_scratch"
   g_summary=$(field_from "$g_scratch" summary); g_findings=$(field_from "$g_scratch" findings); g_fscope=$(field_from "$g_scratch" fix_scope); g_finstr=$(field_from "$g_scratch" fix_instruction)
-  g_sev=$(field_from "$g_scratch" severity); g_cat=$(field_from "$g_scratch" category)
   rm -f "$g_scratch"
-  case "$g_sev" in ''|critical|major|minor) ;; *) fail "invalid severity: $g_sev (want critical|major|minor)" ;; esac
-  case "$g_cat" in ''|correctness|security|scope|test|behavior|maintainability|other) ;; *) fail "invalid category: $g_cat (want correctness|security|scope|test|behavior|maintainability|other)" ;; esac
-  [ "$g_result" = fail ] || [ -z "$g_sev$g_cat" ] || fail "severity and category apply to a failing gate only"
   reject_generic_justification "$g_summary" || fail "$g_gate gate requires a specific summary (>=20 chars, not a stock phrase)"
   if [ "$g_result" = fail ]; then
     reject_generic_justification "$g_findings" || fail "a failing gate requires specific findings (>=20 chars)"
@@ -1297,7 +1265,7 @@ record_gate() {
     printf 'task_sha256: "%s"\nevidence_sha256: "%s"\nplan_sha256: "%s"\nqa_plan_sha256: "%s"\n' "$(section_value "$g_d" freeze task_sha256)" "$(section_value "$g_d" freeze evidence_sha256)" "$(section_value "$g_d" freeze plan_sha256)" "$(section_value "$g_d" freeze qa_plan_sha256)"
     printf 'policy_sha256: "%s"\npipeline: "%s"\n' "$(section_value "$g_d" freeze policy_sha256)" "$(section_value "$g_d" freeze pipeline)"
     printf 'summary: %s\n' "$(one_line "$g_summary")"
-    if [ "$g_result" = fail ]; then printf 'findings: %s\nfix_scope: %s\nfix_instruction: %s\n' "$(one_line "$g_findings")" "$g_fscope" "$(one_line "$g_finstr")"; [ -z "$g_sev" ] || printf 'severity: %s\n' "$g_sev"; [ -z "$g_cat" ] || printf 'category: %s\n' "$g_cat"; fi
+    if [ "$g_result" = fail ]; then printf 'findings: %s\nfix_scope: %s\nfix_instruction: %s\n' "$(one_line "$g_findings")" "$g_fscope" "$(one_line "$g_finstr")"; fi
     printf 'timestamp: "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "$g_gd/$g_name.yaml" || fail "could not write gate record"
   [ -s "$g_gd/$g_name.yaml" ] || { rm -f "$g_gd/$g_name.yaml" "$g_gd/$g_name.manifest"; fail "gate record was not written"; }
@@ -1560,7 +1528,120 @@ cleanup_run() {
   marker=$root/$(config_value active_run_file "$config")
   if [ -f "$marker" ] && [ "$(sed '/^[[:space:]]*$/d' "$marker")" = "$id" ]; then : > "$marker"; fi
   rm -rf "$dir"
+  rm -f -- "$(report_path "$id")" 2>/dev/null || true   # the task's disposable report (this one path); a failure never fails cleanup
   echo "run cleaned up: $id (runtime artifacts removed; ACTIVE_RUN cleared)"
+}
+
+# --- Read-only projections: summary (terminal) and report (disposable HTML) ---------------
+# Both read canonical run files and never write to the repository. An absent fact is "unavailable".
+# Neither is evidence: .agents/OVERSIGHT.md.
+ua() { if [ -n "$1" ]; then printf '%s' "$1"; else printf unavailable; fi; }
+projection_task() { pt=${1:-}; [ -n "$pt" ] || pt=$(active_run) || return 1; [ -n "$pt" ] || fail "no active task: pass a TASK-ID"; require_run "$pt"; printf '%s\n' "$pt"; }
+report_dir() { rd_t=${TMPDIR:-/tmp}; printf '%s/agent-oversight-%s\n' "${rd_t%/}" "$(printf '%s' "$root" | shasum -a 256 | cut -c1-16)"; }
+report_path() { printf '%s/%s.html\n' "$(report_dir)" "$1"; }
+gate_scan() { # ID GATE -> gs_n (records of that gate) and gs_r (result of the latest)
+  gs_n=0; gs_r=''
+  for gs_f in $(gate_names "$1"); do
+    [ "$(gate_field "$(gates_dir "$1")/$gs_f" gate)" = "$2" ] || continue
+    gs_n=$((gs_n + 1)); gs_r=$(gate_field "$(gates_dir "$1")/$gs_f" result)
+  done
+}
+gate_line() { # ID GATE
+  if ! pipeline_declared "$1" || ! pipeline_class_valid "$(pipeline_class "$1")"; then printf unavailable
+  elif ! pipeline_gates "$1" | grep -Fxq "$2"; then printf 'not required'
+  else gate_scan "$1" "$2"; if [ "$gs_n" = 0 ]; then printf unavailable; else printf '%s (attempts %s)' "$gs_r" "$gs_n"; fi; fi
+}
+changed_paths() { task_owned_paths "$1" 2>/dev/null; } # unavailable when the plan scope cannot be read
+summary_run() {
+  sm_id=$(projection_task "${1:-}") || return 1; sm_d=$(run_dir "$sm_id")
+  sm_topo=$(resolve_topology "$sm_d" 2>/dev/null) || sm_topo=''
+  sm_chg=unavailable; sm_open=unavailable; sm_fails=0
+  if sm_paths=$(changed_paths "$sm_id"); then
+    sm_chg=$(printf '%s\n' "$sm_paths" | sed '/^$/d' | wc -l | tr -d ' ')
+    if [ -n "$(open_finding_seq "$sm_id" "$(task_patch_fingerprint "$sm_id")")" ]; then sm_open=1; else sm_open=0; fi
+  fi
+  for sm_f in $(gate_names "$sm_id"); do if [ "$(gate_field "$(gates_dir "$sm_id")/$sm_f" result)" = fail ]; then sm_fails=$((sm_fails + 1)); fi; done
+  printf 'STATUS: %s (handoff %s, knowledge %s)\n' "$(ua "$(run_state "$sm_d")")" "$(ua "$(section_value "$sm_d" handoff state)")" "$(ua "$(section_value "$sm_d" execution knowledge_state)")"
+  printf 'TASK: %s %s\n' "$sm_id" "$(sed -n '1s/^#[[:space:]]*//p' "$sm_d/TASK.md" 2>/dev/null | tr -d '\000-\037\177')"
+  printf 'CLASS/TOPOLOGY: %s / %s\n' "$(ua "$(pipeline_class "$sm_id" | grep -v PENDING || true)")" "$(ua "$sm_topo")"
+  printf 'CHANGED: %s\n' "$sm_chg"
+  for sm_g in REVIEW QA VERIFY; do printf '%s: %s\n' "$sm_g" "$(gate_line "$sm_id" "$sm_g")"; done
+  printf 'FINDINGS: open %s, failing gate records %s\n' "$sm_open" "$sm_fails"
+  printf 'DELIVERY: handoff %s, completion report published %s\n' "$(ua "$(section_value "$sm_d" handoff state)")" "$(ua "$(section_value "$sm_d" completion_report published)")"
+  if [ -f "$(report_path "$sm_id")" ]; then printf 'REPORT: %s\n' "$(report_path "$sm_id")"; else printf 'REPORT: unavailable\n'; fi
+}
+# JSON for the report: strings are escaped bytewise; < > & become \u escapes so the data cannot close the script block.
+js_awk='BEGIN { for (i = 1; i < 32; i++) m[sprintf("%c", i)] = sprintf("\\u%04x", i); m["\""] = "\\\""; m["\\"] = "\\\\"; m["<"] = "\\u003c"; m[">"] = "\\u003e"; m["&"] = "\\u0026"; m["\177"] = "\\u007f"; printf "%s", (list ? "[" : "\"") }
+{ o = ""; for (i = 1; i <= length($0); i++) { c = substr($0, i, 1); o = o ((c in m) ? m[c] : c) }
+  if (list) printf "%s\"%s\"", (NR > 1 ? "," : ""), o; else printf "%s%s", (NR > 1 ? "\\n" : ""), o }
+END { printf "%s", (list ? "]" : "\"") }'
+js() { printf '%s' "$1" | LC_ALL=C awk -v list=0 "$js_awk"; }                      # one string
+jv() { if [ -n "$1" ]; then js "$1"; else printf null; fi; }                       # string or null
+jl() { sed '/^$/d' | LC_ALL=C awk -v list=1 "$js_awk"; }                           # lines -> array of strings
+joinc() { tr '\n' ',' | sed 's/,$//'; }
+flow_item() { printf '{"stage":"%s","state":"%s"},' "$1" "$2"; }
+gate_state() { gate_scan "$1" "$2"; case "$gs_r" in pass) echo done ;; fail) echo failed ;; *) echo pending ;; esac; }
+report_run() {
+  rp_id=$(projection_task "${1:-}") || return 1; rp_d=$(run_dir "$rp_id")
+  rp_tpl=$root/.agents/skills/oversight-report/assets/report-template.html; [ -f "$rp_tpl" ] || fail "report template missing: ${rp_tpl#$root/}"
+  rp_out=$(report_path "$rp_id"); rp_dir=$(report_dir)
+  rp_par=$(CDPATH= cd "$(dirname "$rp_dir")" && pwd -P) || fail "temporary directory is not usable: ${TMPDIR:-/tmp}"; rp_top=$(CDPATH= cd "$root" && pwd -P)
+  case "$rp_par/" in "$rp_top"/*) fail "refusing to write a report inside the repository: $rp_par" ;; esac
+  [ ! -L "$rp_dir" ] || fail "refusing report directory: $rp_dir"
+  mkdir -p -m 700 "$rp_dir" 2>/dev/null || true
+  [ -d "$rp_dir" ] && [ ! -L "$rp_dir" ] || fail "could not create the report directory: $rp_dir"
+  [ "$(ls -ldn "$rp_dir" | awk '{print $3}')" = "$(id -u)" ] || fail "refusing report directory not owned by you: $rp_dir"
+  [ "$(ls -ld "$rp_dir" | cut -c1-10)" = drwx------ ] || chmod 700 "$rp_dir" 2>/dev/null || true
+  [ "$(ls -ld "$rp_dir" | cut -c1-10)" = drwx------ ] || fail "report directory is not mode 700: $rp_dir"
+  [ ! -L "$rp_out" ] && [ ! -d "$rp_out" ] || fail "refusing report target: $rp_out"
+  find "$rp_dir" -maxdepth 1 -type f -name '*.html' -mtime +7 -exec rm -f {} + 2>/dev/null || true
+  rp_hand=$(section_value "$rp_d" handoff state); rp_class=$(pipeline_class "$rp_id" | grep -v PENDING || true)
+  rp_topo=$(resolve_topology "$rp_d" 2>/dev/null) || rp_topo=''
+  rp_ed=$(worker_evidence_dir "$rp_id")
+  rp_fz() { [ -n "$(section_value "$rp_d" freeze "$1")" ] && [ "$(section_value "$rp_d" freeze "$1")" != PENDING ]; }
+  rp_flow=''
+  rp_s=pending; if rp_fz plan_sha256; then rp_s=done; fi; rp_flow=$rp_flow$(flow_item discover "$rp_s")
+  if [ "$(pipeline_needs "$rp_id" evidence)" = yes ]; then rp_s=pending; if rp_fz evidence_sha256; then rp_s=done; fi; rp_flow=$rp_flow$(flow_item evidence "$rp_s"); fi
+  rp_s=pending; if rp_fz plan_sha256; then rp_s=done; fi; rp_flow=$rp_flow$(flow_item plan "$rp_s")
+  case "$rp_hand" in IMPLEMENTING) rp_s=active ;; IMPLEMENTED|CODE_DONE|DONE) rp_s=done ;; *) rp_s=pending ;; esac; rp_flow=$rp_flow$(flow_item implement "$rp_s")
+  for rp_g in $(pipeline_gates "$rp_id"); do rp_flow=$rp_flow$(flow_item "$(printf '%s' "$rp_g" | tr 'A-Z' 'a-z')" "$(gate_state "$rp_id" "$rp_g")"); done
+  case "$rp_hand" in CODE_DONE|DONE) rp_s=done ;; *) rp_s=pending ;; esac; rp_flow=$rp_flow$(flow_item code_done "$rp_s")
+  case "$(section_value "$rp_d" execution knowledge_state)" in not_started|'') rp_s=pending ;; not_applicable) rp_s=skipped ;; *) rp_s=done ;; esac; rp_flow=$rp_flow$(flow_item knowledge "$rp_s")
+  if [ "$rp_hand" = DONE ]; then rp_s=done; else rp_s=pending; fi; rp_flow=$rp_flow$(flow_item done "$rp_s")
+  case "$(run_state "$rp_d")" in FAILED|BLOCKED) rp_flow=$rp_flow$(flow_item outcome "$(run_state "$rp_d" | tr 'A-Z' 'a-z')") ;; esac
+  rp_flow="[${rp_flow%,}]"
+  # roles: recorded = named by a ledger entry, gate record or worker evidence; expected = what the pipeline and topology call for
+  rp_rec=$( { sed -n 's/.* role=\([a-z_]*\) .*/\1/p' "$(ledger_file "$rp_id")" 2>/dev/null
+    for rp_f in $(gate_names "$rp_id"); do gate_field "$(gates_dir "$rp_id")/$rp_f" role; done
+    for rp_f in "$rp_ed"/*.yaml; do if [ -f "$rp_f" ]; then evidence_field "$rp_f" role; fi; done; } | sed '/^$/d' | sort -u)
+  rp_exp=$( { expected_implementation_owner "$rp_topo" 2>/dev/null; for rp_g in $(pipeline_gates "$rp_id"); do gate_independent_role "$rp_g"; done; } | sort -u)
+  rp_roles='['; rp_sep=''
+  for rp_r in $(printf '%s\n%s\n' "$rp_rec" "$rp_exp" | sed '/^$/d' | sort -u); do
+    if printf '%s\n' "$rp_rec" | grep -Fxq "$rp_r"; then rp_s=recorded; else rp_s=expected_no_record; fi
+    rp_roles="$rp_roles$rp_sep{\"role\":$(js "$rp_r"),\"state\":\"$rp_s\"}"; rp_sep=,
+  done; rp_roles=$rp_roles']'
+  rp_att=''; for rp_g in $(pipeline_gates "$rp_id"); do gate_scan "$rp_id" "$rp_g"; rp_att="$rp_att${rp_att:+,}\"$(printf '%s' "$rp_g" | tr 'A-Z' 'a-z')\":$gs_n"; done
+  rp_fnd='['; rp_sep=''; rp_open=''
+  if rp_paths=$(changed_paths "$rp_id"); then rp_open=$(open_finding_seq "$rp_id" "$(task_patch_fingerprint "$rp_id")"); fi
+  for rp_f in $(gate_names "$rp_id"); do
+    rp_gf=$(gates_dir "$rp_id")/$rp_f; [ "$(gate_field "$rp_gf" result)" = fail ] || continue
+    rp_fnd="$rp_fnd$rp_sep{\"gate\":$(js "$(gate_field "$rp_gf" gate)"),\"seq\":$(gate_field "$rp_gf" seq),\"open\":$([ "$(gate_field "$rp_gf" seq)" = "$rp_open" ] && echo true || echo false),\"text\":$(js "$(gate_field "$rp_gf" findings | cut -c1-300)"),\"fixScope\":$(gate_field "$rp_gf" fix_scope | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jl)}"; rp_sep=,
+  done; rp_fnd=$rp_fnd']'
+  rp_files=$(printf '%s\n' "${rp_paths:-}" | sed '/^$/d' | while IFS= read -r rp_p; do
+    rp_nm=$(git -C "$root" diff --numstat HEAD -- "$rp_p" 2>/dev/null | head -1 | cut -f1,2)
+    [ -n "$rp_nm" ] || rp_nm="$(wc -l < "$root/$rp_p" 2>/dev/null | tr -d ' ')	0"
+    printf '{"path":%s,"add":%s,"del":%s}\n' "$(js "$rp_p")" "$(printf '%s' "$rp_nm" | cut -f1 | sed 's/^-$/null/;s/^$/null/')" "$(printf '%s' "$rp_nm" | cut -f2 | sed 's/^-$/null/;s/^$/null/')"
+  done | joinc)
+  rp_ver=$(sed -n 's/^- `\(.*\)` | exit=\([0-9][0-9]*\)[[:space:]]*$/\2 \1/p' "$rp_d/VERIFY.md" 2>/dev/null | while IFS=' ' read -r rp_c rp_cmd; do printf '{"command":%s,"exit":%s}\n' "$(js "$rp_cmd")" "$rp_c"; done | joinc)
+  rp_ac=$(sed -n 's/^- \(AC-[0-9][0-9]*\): *\(.*\)$/\1|\2/p' "$rp_d/TASK.md" 2>/dev/null | while IFS='|' read -r rp_i rp_t; do printf '{"id":%s,"text":%s}\n' "$(js "$rp_i")" "$(js "$rp_t")"; done | joinc)
+  rp_json=$(printf '{"task":{"id":%s,"title":%s},"status":{"run":%s,"handoff":%s,"knowledge":%s},"class":%s,"topology":%s,"flow":%s,"roles":%s,"attempts":{%s},"fixLoops":%s,"criteria":[%s],"files":[%s],"findings":%s,"verification":[%s]}' \
+    "$(js "$rp_id")" "$(jv "$(sed -n '1s/^#[[:space:]]*//p' "$rp_d/TASK.md" 2>/dev/null)")" "$(jv "$(run_state "$rp_d")")" "$(jv "$rp_hand")" "$(jv "$(section_value "$rp_d" execution knowledge_state)")" "$(jv "$rp_class")" "$(jv "$rp_topo")" \
+    "$rp_flow" "$rp_roles" "$rp_att" "$(fix_cycles_used "$rp_id")" "$rp_ac" "$rp_files" "$rp_fnd" "$rp_ver")
+  rp_jf=$(mktemp "$rp_dir/.report.XXXXXX") || fail "could not create a report file in $rp_dir"
+  rp_tmp=$(mktemp "$rp_dir/.report.XXXXXX") || { rm -f "$rp_jf"; fail "could not create a report file in $rp_dir"; }
+  printf '%s\n' "$rp_json" > "$rp_jf"
+  if RP_DATA=$rp_jf awk '$0 == "__OVERSIGHT_DATA__" { while ((r = (getline l < ENVIRON["RP_DATA"])) > 0) { print l; n++ } if (r < 0 || !n) bad = 1; next } { print } END { exit bad }' "$rp_tpl" > "$rp_tmp" && mv -f "$rp_tmp" "$rp_out"; then rm -f "$rp_jf"; printf 'report: %s\n' "$rp_out"
+  else rm -f "$rp_tmp" "$rp_jf"; fail "could not write the report"; fi
 }
 
 knowledge_done() {
@@ -2526,9 +2607,7 @@ command=${1:-}
 # touch implementation evidence. Explorer and Architect are planning-phase
 # specialists that return findings to the orchestrator: they may read and
 # validate, and record nothing at all.
-# `summary` and `report` are projections: they write only the ignored default report path
-# (.agents/runtime/reports/), and `report --out` is refused for every role except
-# full_lifecycle (see oversight_run), so no read-only role can write a chosen file through it.
+# `summary` and `report` read run state only. `report` writes one disposable file outside the repository.
 case "$execution_role" in
   independent_reviewer|independent_qa|independent_verifier)
     case "$command" in role|status|effective|pipeline|verify-*|freshness|validate|patch-fingerprint|gate|summary|report) ;; *) fail "command denied for $execution_role" ;; esac ;;
@@ -2543,9 +2622,8 @@ case "$command" in
   branch) require_full_lifecycle; branch_setup "${2:?usage: $0 branch <TASK-ID>}" ;;
   classify) require_full_lifecycle; classify "${2:?usage: $0 classify <TASK-ID> <TRIVIAL|STANDARD|COMPLEX|CRITICAL> [review]}" "${3:?usage: $0 classify <TASK-ID> <TRIVIAL|STANDARD|COMPLEX|CRITICAL> [review]}" "${4:-}" ;;
   pipeline) pipeline_show "${2:?usage: $0 pipeline <TASK-ID>}" ;;
-  summary) shift; oversight_run summary "$@" ;;
-  report) shift; oversight_run report "$@" ;;
-  oversight-model) shift; oversight_run model "$@" ;;
+  summary) summary_run "${2:-}" ;;
+  report) report_run "${2:-}" ;;
   decide) require_full_lifecycle; id=${2:?usage: $0 decide <TASK-ID> <RED|GREEN|REFACTOR|FIX> [--failure CODE] [--model M] [--effort E] [--delegation N] [--context-bytes B]}; ph=${3:?usage: $0 decide <TASK-ID> <PHASE> ...}; shift 3; decide "$id" "$ph" "$@" ;;
   decision-outcome) require_full_lifecycle; id=${2:?usage: $0 decision-outcome <TASK-ID> <PHASE> <success|failure> [k=v ...]}; ph=${3:?}; oc=${4:?}; shift 4; decision_outcome "$id" "$ph" "$oc" "$@" ;;
   freeze) require_full_lifecycle; freeze "${2:?usage: $0 freeze <TASK-ID>}" ;;
@@ -2574,7 +2652,7 @@ case "$command" in
   publish-completion-report) publish_completion_report "${2:?usage: $0 publish-completion-report <TASK-ID> [ADAPTER]}" "${3:-markdown}" ;;
   verify-completion-report) verify_completion_report "${2:?usage: $0 verify-completion-report <TASK-ID>}" ;;
   validate) validate_run "${2:?usage: $0 validate <TASK-ID>}" ;;
-  test) require_full_lifecycle; fixture_test; sh "$root/scripts/exec-policy-test.sh"; sh "$root/scripts/lifecycle-test.sh"; sh "$root/scripts/oversight-test.sh"; sh "$root/scripts/oversight-model-test.sh"; branch_test; policy_test; standalone_test; worker_evidence_write_failure_test; knowledge_scope_test; delivery_check_knowledge_scope_test; validate_knowledge_scope_test; wiki_lint_self_scan_test ;;
+  test) require_full_lifecycle; fixture_test; sh "$root/scripts/exec-policy-test.sh"; sh "$root/scripts/lifecycle-test.sh"; sh "$root/scripts/oversight-test.sh"; branch_test; policy_test; standalone_test; worker_evidence_write_failure_test; knowledge_scope_test; delivery_check_knowledge_scope_test; validate_knowledge_scope_test; wiki_lint_self_scan_test ;;
   role-test) require_full_lifecycle; role_test ;;
-  *) echo "usage: $0 {role|status|effective|baseline|branch|classify|pipeline|freeze|refreeze|verify-freeze|verify-scope|verify-knowledge-scope|freshness|handoff|verify-handoff|delivery-check|worker-evidence|verify-worker-evidence|gate|amend|terminate|cleanup|patch-fingerprint|window-open|window-close|verify-gates|verify-seal|task-source-relocate|task-source-status|knowledge-done|publish-completion-report|verify-completion-report|validate|summary|report|oversight-model|test|role-test} [TASK-ID]" >&2; exit 2 ;;
+  *) echo "usage: $0 {role|status|effective|baseline|branch|classify|pipeline|freeze|refreeze|verify-freeze|verify-scope|verify-knowledge-scope|freshness|handoff|verify-handoff|delivery-check|worker-evidence|verify-worker-evidence|gate|amend|terminate|cleanup|patch-fingerprint|window-open|window-close|verify-gates|verify-seal|task-source-relocate|task-source-status|knowledge-done|publish-completion-report|verify-completion-report|validate|summary|report|test|role-test} [TASK-ID]" >&2; exit 2 ;;
 esac

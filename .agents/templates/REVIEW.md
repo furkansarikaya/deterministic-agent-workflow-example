@@ -10,4 +10,4 @@ Verdict: PASS | FAIL
 
 ## Findings
 
-Cover correctness, maintainability, architecture compliance, security, needless complexity, scope expansion and shortcuts. Give each finding as `path:line` and the reason. FAIL: add the `fix_scope` and fix instruction the gate record carries, plus optional `severity` and `category`.
+Cover correctness, maintainability, architecture compliance, security, needless complexity, scope expansion and shortcuts. Give each finding as `path:line` and the reason. FAIL: add the `fix_scope` and fix instruction the gate record carries.

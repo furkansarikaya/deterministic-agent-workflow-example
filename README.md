@@ -68,7 +68,7 @@ The control plane needs only the minimum platform in [.agents/ENGINEERING.md](.a
 
 ```sh
 ./scripts/verify.sh            # the example application: go build, test, vet
-./scripts/agent.sh test        # control-plane self-tests: fixture, lifecycle, branch, policy, standalone, knowledge, wiki, oversight (several minutes)
+./scripts/agent.sh test        # control-plane self-tests: fixture, lifecycle, branch, policy, standalone, knowledge, wiki, presentation (several minutes)
 ./scripts/agent.sh status
 ./scripts/wiki-lint.sh
 ```
@@ -77,12 +77,11 @@ The control plane needs only the minimum platform in [.agents/ENGINEERING.md](.a
 
 ## Human oversight
 
-Run state is canonical. `summary` and `report` project it for humans; they are not evidence and never change a run. They are sh and awk, with nothing to build. Full contract, including the optional `workflow-event/1` observer emission and its privacy boundary: [.agents/OVERSIGHT.md](.agents/OVERSIGHT.md).
+Run state is canonical. `summary` is a terminal projection. `report` is an optional disposable HTML page written outside the repository and deleted by `cleanup`. Neither is evidence. Contract: [.agents/OVERSIGHT.md](.agents/OVERSIGHT.md); the skill is `.agents/skills/oversight-report/SKILL.md`.
 
 ```sh
-./scripts/agent.sh summary [TASK-ID]                 # concise text
-./scripts/agent.sh report [TASK-ID] [--out FILE]     # self-contained HTML in .agents/runtime/reports/ (git-ignored)
-./scripts/agent.sh oversight-model [TASK-ID]         # the model as JSON
+./scripts/agent.sh summary [TASK-ID]    # concise text
+./scripts/agent.sh report [TASK-ID]     # only when asked; ${TMPDIR:-/tmp}/agent-oversight-<hash>/<TASK-ID>.html
 ```
 
 ## Guides
@@ -93,7 +92,7 @@ Run state is canonical. `summary` and `report` project it for humans; they are n
 
 ## Adopt in another repository
 
-1. Copy and adapt `AGENTS.md`, `CLAUDE.md`, `.agents/`, `scripts/agent.sh`, `scripts/worker-run.sh`, `scripts/exec-policy.sh`, `scripts/wiki-lint.sh`, the `scripts/oversight/` directory (sh and awk, no build step) and the test scripts (`lifecycle-test.sh`, `exec-policy-test.sh`, `oversight-test.sh`, `oversight-model-test.sh`, `oversight-fixture.sh`). Add `.agents/runtime/` to `.gitignore`.
+1. Copy and adapt `AGENTS.md`, `CLAUDE.md`, `.agents/`, `scripts/agent.sh`, `scripts/worker-run.sh`, `scripts/exec-policy.sh`, `scripts/wiki-lint.sh`, the optional presentation layer (`scripts/oversight/event.sh`, `.agents/skills/oversight-report/`, `.claude/skills/oversight-report/`) and the test scripts (`lifecycle-test.sh`, `exec-policy-test.sh`, `oversight-test.sh`). Add `.agents/runtime/` to `.gitignore`. The presentation layer MAY be omitted; the workflow does not depend on it.
 2. Adapt `scripts/verify.sh`, `.agents/ENGINEERING.md` and `.agents/VERIFICATION.md` to the real stack; set `default_topology` in `.agents/config.yaml`.
 3. Keep `ACTIVE_RUN` empty and `.agents/runs/` gitignored; start the first task with one sentence.
 4. Initialize `docs/wiki/` with the existing LLM Wiki skill; use `/wiki-ingest` only after CODE DONE, and only for durable knowledge.

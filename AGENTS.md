@@ -22,6 +22,6 @@ The canonical workflow is `.agents/WORKFLOW.md`: a deterministic orchestrator, b
 - MUST NOT reset, overwrite, stage or claim user-owned uncommitted changes. The baseline fingerprints them so scope checks can tell them from task changes.
 - Vibecosystem is capability-only. Use allowlisted capabilities inside the frozen contract. MUST NOT auto-start swarm, recall, learning or scope mutation.
 - `CODE_DONE` FAILS on: a failed or missing required gate, a freeze or freshness mismatch, an unexpected or unmapped path, a stale fingerprint, missing implementation evidence or TDD exemption, or an unexplained user change. `CODE_DONE` grants no delivery right (WORKFLOW "Completion, delivery and cleanup").
-- Oversight output (`summary`, `report`) is a projection of run state, not evidence. It MUST NOT change a run artifact (`.agents/OVERSIGHT.md`).
+- Oversight output (`summary`, `report`) is a projection of run state, not evidence. It MUST NOT change a run artifact (`.agents/OVERSIGHT.md`). Load `.agents/skills/oversight-report/SKILL.md` only when the user asks for a report.
 
 This example's control-plane and template maintenance is an explicit exception, only when the user requests it: maintain the current files directly, without creating a run. Normal application work always uses this protocol.

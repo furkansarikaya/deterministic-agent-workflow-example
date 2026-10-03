@@ -8,7 +8,7 @@
 | CAPABILITY PLANE: vibecosystem | available skills, roles, hooks, workers | task scope or workflow authority |
 | KNOWLEDGE PLANE: `docs/wiki` | sourced project knowledge and history | canonical truth or active instructions |
 | OBJECTIVE REPOSITORY STATE | code, tests, build/static results | rationale for work |
-| OVERSIGHT: `scripts/oversight` (sh + awk) | read-only projection of run state: CLI summary, HTML report, diagrams, optional workflow events | truth, evidence, gates |
+| PRESENTATION: `summary`, `report`, `scripts/oversight/event.sh` | read-only terminal summary, optional disposable HTML report, optional fail-open workflow events | truth, evidence, gates |
 
 Engineering determinism means the same repository SHA, contract, frozen evidence, frozen plan, policy/capability set, and verification commands produce the same observable acceptance result—not identical model prose.
 
@@ -20,7 +20,7 @@ Engineering determinism means the same repository SHA, contract, frozen evidence
 - memory != evidence: recalled context cannot silently join frozen evidence.
 - review != QA != verification: the Reviewer judges the code, QA judges behavior against the frozen QA plan, the Verifier mechanically proves the frozen plan was implemented — three independent gates, required per task classification.
 - run state is disposable: `.agents/runs/<ID>/` is temporary working state, deleted at completion; permanent knowledge is source code, workflow contracts and (rarely) the wiki.
-- presentation != truth: the oversight model, summary and report project run state for humans. They are not evidence, hold no fact run state lacks, and never gate a task (`.agents/OVERSIGHT.md`).
+- presentation != truth: summary and report project run state for humans. They are not evidence, hold no fact run state lacks, and never gate a task (`.agents/OVERSIGHT.md`). Deleting all presentation code leaves the workflow unchanged.
 - CODE DONE != KNOWLEDGE DONE: source knowledge is written only in Transaction B.
 
 ```mermaid
@@ -31,6 +31,12 @@ flowchart LR
 ```
 
 Which of Discover/Evidence/QA plan/Review/QA/Verify apply is decided by the classification (TRIVIAL, STANDARD, COMPLEX, CRITICAL); see `.agents/WORKFLOW.md`.
+
+## Workflow events (optional observer)
+
+Set `AGENT_WORKFLOW_EVENTS_URL` to an `http(s)` URL. `scripts/oversight/event.sh` then POSTs one JSON event per transition with `curl`. Emission is fail-open: an unset URL, a missing `curl` or an invalid value is a silent no-op. Each POST has a 0.3 s limit and no retry. No command fails because of it. The receiver is never consulted.
+
+The contract (schema `workflow-event/1`, fields, role and `seq` rules) is the header of `scripts/oversight/event.sh`. An event MUST NOT carry prose, titles, paths, source, prompts or findings text. `runRef` is the task id and MUST be unique across the repositories that report to one collector.
 
 ## Transactions
 
