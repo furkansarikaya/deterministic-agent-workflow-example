@@ -139,6 +139,19 @@ O report >/dev/null; r1=$(shasum -a 256 < "$rep"); O report >/dev/null; r2=$(sha
 eq "same input, identical report bytes" "$r1" "$r2"
 eq "report generation leaves the run directory byte-identical" "$(tree_hash "$FX_DIR")" "$before"
 fails "a report inside .agents/runs/ is refused" sh "$ovs/oversight.sh" report --root "$FX_ROOT" --task T-1 --out "$FX_DIR/REPORT.html"
+git -C "$FX_ROOT" init -q >/dev/null 2>&1
+git_before=$(shasum -a 256 < "$FX_ROOT/.git/config")
+fails "a report over git metadata (.git/config) is refused" sh "$ovs/oversight.sh" report --root "$FX_ROOT" --task T-1 --out "$FX_ROOT/.git/config"
+fails "a report inside git metadata (.git/info/x) is refused" sh "$ovs/oversight.sh" report --root "$FX_ROOT" --task T-1 --out "$FX_ROOT/.git/info/x.html"
+eq "git metadata is byte-identical after the refusals" "$(shasum -a 256 < "$FX_ROOT/.git/config")" "$git_before"
+# a linked worktree whose main repository path contains spaces: the guard must not split the path
+wtm="$FX_BASE/wt sp/main repo"; wtl="$FX_BASE/wt sp/linked"
+mkdir -p "$wtm" && git -C "$wtm" init -q && git -C "$wtm" -c user.email=a@b -c user.name=x commit -q --allow-empty -m i && git -C "$wtm" worktree add -q "$wtl" -b wtb
+cp -R "$FX_ROOT/.agents" "$wtl/"
+wt_before=$(shasum -a 256 < "$wtm/.git/config")
+fails "a report over the main repository's .git/config (path with spaces, linked worktree) is refused" sh "$ovs/oversight.sh" report --root "$wtl" --task T-1 --out "$wtm/.git/config"
+fails "a report inside the main repository's .git/worktrees (path with spaces) is refused" sh "$ovs/oversight.sh" report --root "$wtl" --task T-1 --out "$wtm/.git/worktrees/linked/HEAD"
+eq "the main repository's git metadata is byte-identical after the refusals" "$(shasum -a 256 < "$wtm/.git/config")" "$wt_before"
 fails "a report inside .agents/runs/ through .. is refused" sh "$ovs/oversight.sh" report --root "$FX_ROOT" --task T-1 --out "$FX_ROOT/.agents/runtime/../runs/T-1/R.html"
 [ ! -e "$FX_DIR/REPORT.html" ] && [ ! -e "$FX_DIR/R.html" ] || bad "a refused report was written anyway"; ok
 ln -s "$FX_DIR" "$FX_BASE/runs-link"

@@ -19,7 +19,7 @@ Canonical run state → oversight model → CLI summary, HTML report, diagrams. 
 ./scripts/agent.sh oversight-model [TASK-ID]         # the model as JSON
 ```
 
-`TASK-ID` defaults to the active run. Every role MAY run them; only `full_lifecycle` MAY pass `report --out`. Nothing is built or installed.
+`TASK-ID` defaults to the active run. Every role MAY run `summary` and `report`. `oversight-model` is available to `full_lifecycle` and `implementation_worker` only. Only `full_lifecycle` MAY pass `report --out`. Nothing is built or installed.
 
 ## Implementation (`scripts/oversight/`, sh and POSIX awk)
 

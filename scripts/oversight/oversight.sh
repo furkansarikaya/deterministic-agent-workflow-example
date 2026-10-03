@@ -119,9 +119,18 @@ case "$cmd" in
     shown() { case "$1" in "$rroot"/*) printf '%s\n' "${1#"$rroot"/}" ;; *) if [ -n "$out_arg" ]; then printf '%s\n' "$out_arg"; else printf '%s\n' "$1"; fi ;; esac; }
     [ ! -L "$target" ] || fail "refusing to write a report through a symlink: $(shown "$target")"
     [ ! -d "$target" ] || fail "refusing to write a report over a directory: $(shown "$target")"
+    # git's own metadata is never a report target either (a worktree's `.git` may be a file)
+    git --no-optional-locks -C "$rroot" rev-parse --absolute-git-dir --git-common-dir > "$tmp/gitdirs" 2>/dev/null || : > "$tmp/gitdirs"
     walk=$target
     while [ -n "$walk" ]; do
       if [ -e "$walk" ] && [ "$walk" -ef "$runs" ]; then fail "refusing to write a report inside .agents/runs/ (run state is never modified)"; fi
+      if [ -e "$walk" ]; then
+        if [ "$walk" -ef "$rroot/.git" ]; then fail "refusing to write a report inside git metadata"; fi
+        while IFS= read -r gd; do
+          case "$gd" in /*) ;; *) gd=$rroot/$gd ;; esac
+          if [ -e "$gd" ] && [ "$walk" -ef "$gd" ]; then fail "refusing to write a report inside git metadata"; fi
+        done < "$tmp/gitdirs"
+      fi
       walk=${walk%/*}
     done
     if [ -f "$target" ]; then
